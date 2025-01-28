@@ -1,4 +1,4 @@
-from __main__ import qt, ctk, vtk, slicer
+import qt, ctk, vtk, slicer
 
 from .PedicleScrewSimulatorStep import *
 from .Helper import *
@@ -9,19 +9,11 @@ class MeasurementsStep( PedicleScrewSimulatorStep ):
 
     def __init__( self, stepid ):
       self.initialize( stepid )
-      self.setName( '3. Measurements' )
+      self.setName( '4. Measurements' )
       self.setDescription( 'Make Anatomical Measurements' )
 
       self.__parent = super( MeasurementsStep, self )
       qt.QTimer.singleShot(0, self.killButton)
-      #self.__vrDisplayNode = None
-      #self.__threshold = [ -1, -1 ]
-
-      # initialize VR stuff
-      #self.__vrLogic = slicer.modules.volumerendering.logic()
-      #self.__vrOpacityMap = None
-
-      #self.__roiVolume = None
 
       #self.__xnode = None
       self.adjustCount = 0
@@ -45,7 +37,6 @@ class MeasurementsStep( PedicleScrewSimulatorStep ):
         self.rulerList.append("%.2f" % ruler.GetMeasurement("length").GetValue())
     '''
     def updateTable(self):
-      #logging.debug(pNode.GetParameter('vertebrae'))
       self.fiducial = self.fiducialNode()
       self.fidNumber = self.fiducial.GetNumberOfControlPoints()
       self.fidLabels = []
@@ -106,7 +97,8 @@ class MeasurementsStep( PedicleScrewSimulatorStep ):
 
       #coords = [0,0,0]
       #observer.GetFiducialCoordinates(coords)
-      self.sliceChange()
+      # self.sliceChange()
+      pass
 
     @vtk.calldata_type(vtk.VTK_OBJECT)
     def onNodeAddedRemoved(self, caller, event, calldata):
@@ -185,51 +177,49 @@ class MeasurementsStep( PedicleScrewSimulatorStep ):
         viewNodes = slicer.util.getNodesByClass('vtkMRMLSliceDisplayNode')
         for viewNode in viewNodes:
           viewNode.SetIntersectingSlicesVisibility(0)
-
         self.adjustCount2 = 1
         self.crosshair.setText("Show Crosshair")
-
-      elif self.adjustCount2 == 1:
+      else:
         # Enable Slice Intersections
         viewNodes = slicer.util.getNodesByClass('vtkMRMLSliceDisplayNode')
         for viewNode in viewNodes:
           viewNode.SetIntersectingSlicesVisibility(1)
-
         self.adjustCount2 = 0
         self.crosshair.setText("Hide Crosshair")
 
     def begin(self):
-      #slicer.app.applicationLogic().PropagateVolumeSelection(1)
       selectionNode = slicer.mrmlScene.GetNodeByID("vtkMRMLSelectionNodeSingleton")
       # place rulers
       selectionNode.SetReferenceActivePlaceNodeClassName("vtkMRMLMarkupsLineNode")
-      # to place ROIs use the class name vtkMRMLMarkupsLineNode
       interactionNode = slicer.mrmlScene.GetNodeByID("vtkMRMLInteractionNodeSingleton")
+      # mode 1 => place mode
       placeModePersistence = 1
       interactionNode.SetPlaceModePersistence(placeModePersistence)
-      # mode 1 is Place, can also be accessed via slicer.vtkMRMLInteractionNode().Place
       interactionNode.SetCurrentInteractionMode(1)
 
     def stop(self):
       selectionNode = slicer.mrmlScene.GetNodeByID("vtkMRMLSelectionNodeSingleton")
       # place rulers
       selectionNode.SetReferenceActivePlaceNodeClassName("vtkMRMLMarkupsLineNode")
-      # to place ROIs use the class name vtkMRMLMarkupsLineNode
       interactionNode = slicer.mrmlScene.GetNodeByID("vtkMRMLInteractionNodeSingleton")
+      # mode 2 => view transform mode
       placeModePersistence = 1
       interactionNode.SetPlaceModePersistence(placeModePersistence)
-      # mode 1 is Place, can also be accessed via slicer.vtkMRMLInteractionNode().Place
       interactionNode.SetCurrentInteractionMode(2)
 
     def startMeasure(self):
       if self.measureCount == 0:
-        self.begin()
+        # Switch to measuring
+        self.begin()  # your function that sets place mode
         self.measureCount = 1
         self.startMeasurements.setText("Stop Measuring")
-      elif self.measureCount == 1:
-        self.stop()
+        self.startMeasurements.setStyleSheet("background-color: red;")
+      else:
+        # Switch to not measuring
+        self.stop()  # your function that ends place mode
         self.measureCount = 0
         self.startMeasurements.setText("Start Measuring")
+        self.startMeasurements.setStyleSheet("background-color: green;")
 
     def createUserInterface( self ):
       slicer.mrmlScene.AddObserver(slicer.vtkMRMLScene.NodeAddedEvent, self.onNodeAddedRemoved)
@@ -240,39 +230,27 @@ class MeasurementsStep( PedicleScrewSimulatorStep ):
         ruler.AddObserver(slicer.vtkMRMLMarkupsNode.PointModifiedEvent, self.rulerLengthCheck)
 
       self.__layout = self.__parent.createUserInterface()
-      #slicer.app.applicationLogic().PropagateVolumeSelection()
 
-      #self.fiducialSelectionButton = slicer.qSlicerMouseModeToolBar()
-      #self.fiducialSelectionButton.connect('mrmlSceneChanged(slicer.vtkMRMLScene*)', 'setMRMLScene(slicer.vtkMRMLScene*)')
-      #buttonDescription = qt.QLabel('Click to Add Insertion Points to Scene:')
-      #self.__layout.addRow(buttonDescription)
-      #self.__layout.addRow(self.fiducialSelectionButton)
-      #self.fiducialSelectionButton.setApplicationLogic(slicer.app.applicationLogic())
-      #self.fiducialSelectionButton.setMRMLScene(slicer.app.mrmlScene())
+      # Track whether we are currently measuring
+      self.isMeasuring = False
 
       self.startMeasurements = qt.QPushButton("Start Measuring")
+      self.startMeasurements.setStyleSheet("background-color: green;")
+      # Connect the button's click to our toggling function
       self.startMeasurements.connect('clicked(bool)', self.startMeasure)
-      #self.__layout.addWidget(self.startMeasurements)
 
-      #self.stopMeasurements = qt.QPushButton("Stop Measuring")
-      #self.stopMeasurements.connect('clicked(bool)', self.stop)
-      #self.__layout.addWidget(self.stopMeasurements)
-
-      #self.updateTable2 = qt.QPushButton("Update Table")
-      #self.updateTable2.connect('clicked(bool)', self.updateTable)
-      #self.__layout.addWidget(self.updateTable2)
-
+      # 2) Create any other buttons you want
       self.adjustFiducials = qt.QPushButton("Adjust Landmarks")
       self.adjustFiducials.connect('clicked(bool)', self.makeFidAdjustments)
 
       self.crosshair = qt.QPushButton("Hide Crosshair")
       self.crosshair.connect('clicked(bool)', self.crosshairVisible)
 
+      # 3) Add buttons to layout
       buttonLayout = qt.QHBoxLayout()
       buttonLayout.addWidget(self.startMeasurements)
-      #buttonLayout.addWidget(self.stopMeasurements)
-      #buttonLayout.addWidget(self.updateTable2)
       self.__layout.addRow(buttonLayout)
+
       buttonLayout2 = qt.QHBoxLayout()
       buttonLayout2.addWidget(self.adjustFiducials)
       buttonLayout2.addWidget(self.crosshair)
@@ -285,35 +263,11 @@ class MeasurementsStep( PedicleScrewSimulatorStep ):
       self.fidSides = []
       self.oldPosition = 0
 
-      '''
-      for i in range(0,self.fidNumber):
-          self.fidLabels.append(slicer.modules.PedicleScrewSimulatorWidget.landmarksStep.table2.item(i,0).text())
-          self.fidLevels.append(slicer.modules.PedicleScrewSimulatorWidget.landmarksStep.table2.cellWidget(i,1).currentText)
-          self.fidSides.append(slicer.modules.PedicleScrewSimulatorWidget.landmarksStep.table2.cellWidget(i,2).currentText)
-          #self.fidLabels.append(self.fiducial.GetNthFiducialLabel(i))
-          #position = [0,0,0]
-          #self.fiducial.GetNthFiducialPosition(i,position)
-          #self.fidPositions.append(position)
-      '''
       logging.debug(self.fidLabels)
       logging.debug(self.fidLevels)
       logging.debug(self.fidSides)
-      #self.levels = ("C1","C2","C3","C4","C5","C6","C7","T1","T2","T3","T4","T5","T6","T7","T8","T9","T10","T11","T12","L1", "L2", "L3", "L4", "L5","S1")
-
-      #pNode = self.parameterNode()
       # Angle Table
       horizontalHeaders = ["Fiducial","Level","Side","Pedicle\n Length", "Pedicle\n Width"]
-      #self.vertebra = str(pNode.GetParameter('vertebra'))
-      #self.inst_length = str(pNode.GetParameter('inst_length'))
-      #logging.debug(self.vertebra)
-      #logging.debug(self.inst_length)
-
-      #self.levelselection = []
-
-      #for i in range(self.levels.index(self.vertebra),self.levels.index(self.vertebra)+int(self.inst_length)):
-      #  logging.debug(self.levels[i])
-      #  self.levelselection.append(self.levels[i])
-      #logging.debug(self.levelselection)
 
       self.angleTable = qt.QTableWidget(self.fidNumber, 5)
       self.angleTable.sortingEnabled = False
@@ -326,20 +280,7 @@ class MeasurementsStep( PedicleScrewSimulatorStep ):
 
       self.angleTable.setHorizontalHeaderLabels(horizontalHeaders)
       self.items = []
-      '''
-      for i in range(0,self.fidNumber):
-          #logging.debug(self.levelselection[i] + "loop")
-          Label = qt.QTableWidgetItem(str(self.fidLabels[i]))
-          logging.debug(Label)
-          Level = qt.QTableWidgetItem(str(self.fidLevels[i]))
-          logging.debug(Level)
-          Side = qt.QTableWidgetItem(str(self.fidSides[i]))
-          logging.debug(Side)
-          #self.items.append(Label)
-          self.angleTable.setItem(i, 0, Label)
-          self.angleTable.setItem(i, 1, Level)
-          self.angleTable.setItem(i, 2, Side)
-      '''
+
       reconCollapsibleButton = ctk.ctkCollapsibleButton()
       reconCollapsibleButton.text = "Change Slice Reconstruction"
       self.__layout.addWidget(reconCollapsibleButton)
@@ -361,41 +302,12 @@ class MeasurementsStep( PedicleScrewSimulatorStep ):
       #add label + combobox
       reconLayout.addRow( reconLabel, self.selector )
 
-      #self.reconSlice = slicer.qMRMLNodeComboBox()
-      #self.recon = slicer.modules.reformat.createNewWidgetRepresentation()
-      # pull slice selector
-      #self.selector = self.recon.findChild('qMRMLNodeComboBox')
-      #self.selector.setCurrentNodeID('vtkMRMLSliceNodeRed')
-      #self.__layout.addWidget(self.selector)
-
       self.slider = ctk.ctkSliderWidget()
-      #self.slider = PythonQt.qMRMLWidgets.qMRMLLinearTransformSlider()
-      #tnode = slicer.mrmlScene.GetNodeByID('vtkMRMLLinearTransformNode1')
-      #self.slider.setMRMLTransformNode(tnode)
       self.slider.connect('valueChanged(double)', self.sliderValueChanged)
       self.slider.minimum = -100
       self.slider.maximum = 100
       reconLayout.addRow( rotationLabel, self.slider)
 
-      '''
-      # pull offset & rotation sliders
-
-      self.reconButton = self.recon.findChild('ctkCollapsibleButton')
-      self.reconProperties = self.reconButton.findChildren('ctkCollapsibleGroupBox')
-      self.reconSpecificProperty1 = self.reconProperties[2]
-      self.reconSlider1 = self.reconSpecificProperty1.findChildren('qMRMLLinearTransformSlider')
-      self.slider = self.reconSlider1[0]
-      self.reconSpecificProperty2 = self.reconProperties[0]
-      self.reconSlider2 = self.reconSpecificProperty2.findChildren('qMRMLLinearTransformSlider')
-      self.slider2 = self.reconSlider2[0]
-      rText = qt.QLabel("Rotate Slice:")
-      self.__layout.addWidget(rText)
-      self.__layout.addWidget(self.slider)
-      #tText = qt.QLabel("Translate Slice:")
-      #self.__layout.addWidget(tText)
-      #self.__layout.addWidget(self.slider2)
-      '''
-      # self.updateWidgetFromParameters(self.parameterNode())
       qt.QTimer.singleShot(0, self.killButton)
       self.updateTable()
 
@@ -451,13 +363,13 @@ class MeasurementsStep( PedicleScrewSimulatorStep ):
       lm = slicer.app.layoutManager()
       if lm == None:
         return
-      lm.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutSideBySideView)
+      lm.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpRedSliceView)
 
       logging.debug("entering measurements")
       self.zoomIn()
 
       # Enable Slice Intersections
-      viewNodes = slicer.util.getNodesByClass('vtkMRMLSliceCompositeNode')
+      viewNodes = slicer.util.getNodesByClass('vtkMRMLSliceDisplayNode')
       for viewNode in viewNodes:
         viewNode.SetIntersectingSlicesVisibility(1)
 
@@ -465,25 +377,31 @@ class MeasurementsStep( PedicleScrewSimulatorStep ):
       for rulerX in rulers:
         rulerX.GetDisplayNode().SetVisibility(True)
 
-      if self.entryCount == 1:
-        self.updateTable()
-
-
+      self.updateTable()
 
     def onExit(self, goingTo, transitionType):
       super(MeasurementsStep, self).onExit(goingTo, transitionType)
-      logging.debug("exiting")
-      # Disable Slice Intersections
-      viewNodes = slicer.util.getNodesByClass('vtkMRMLSliceCompositeNode')
+      logging.debug("exiting measurements step")
+
+      # Turn off slice intersections
+      viewNodes = slicer.util.getNodesByClass('vtkMRMLSliceDisplayNode')
       for viewNode in viewNodes:
         viewNode.SetIntersectingSlicesVisibility(0)
 
+      # Hide all markups lines (rulers)
       rulers = slicer.util.getNodesByClass('vtkMRMLMarkupsLineNode')
       for rulerX in rulers:
         rulerX.GetDisplayNode().SetVisibility(False)
 
+      # Reset measuring state so next time we enter, it's "Start Measuring"
+      self.stop()  # ensure place mode is off
+      self.measureCount = 0
+      self.startMeasurements.setText("Start Measuring")
+      self.startMeasurements.setStyleSheet("background-color: green;")
+
+      # If next step is 'Screw', do extra processing
       if goingTo.id() == 'Screw':
-        logging.debug("screw")
+        logging.debug("screw step next")
         self.doStepProcessing()
 
       self.stop()
@@ -493,8 +411,6 @@ class MeasurementsStep( PedicleScrewSimulatorStep ):
       # extra error checking, in case the user manages to click ReportROI button
       if goingTo.id() != 'Landmarks' and goingTo.id() != 'Screw':
         return
-
-
 
     def doStepProcessing(self):
       logging.debug('Done')

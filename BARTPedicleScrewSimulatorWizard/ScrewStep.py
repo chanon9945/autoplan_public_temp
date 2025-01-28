@@ -1,4 +1,4 @@
-from __main__ import qt, ctk, vtk, slicer
+import qt, ctk, vtk, slicer
 
 from .PedicleScrewSimulatorStep import *
 from .Helper import *
@@ -58,62 +58,6 @@ class ScrewStep(PedicleScrewSimulatorStep):
     def createUserInterface( self ):
 
       self.__layout = self.__parent.createUserInterface()
-      '''
-      # Input fiducials node selector
-      #self.inputFiducialsNodeSelector = slicer.qMRMLNodeComboBox()
-      self.inputFiducialsNodeSelector.toolTip = "Select a fiducial to define an insertion point for a screw."
-      self.inputFiducialsNodeSelector.nodeTypes = (("vtkMRMLMarkupsFiducialNode"), "")
-      self.inputFiducialsNodeSelector.addEnabled = False
-      self.inputFiducialsNodeSelector.removeEnabled = False
-      self.inputFiducialsNodeSelector.setMRMLScene( slicer.mrmlScene )
-      self.inputFiducialsNodeSelector.connect('currentNodeChanged(vtkMRMLNode*)', self.fidChanged)
-      self.__layout.addRow("Select Insertion Point:", self.inputFiducialsNodeSelector)
-      self.fid = self.inputFiducialsNodeSelector.currentNode()
-      self.sliceChange()
-      '''
-
-      '''
-      # Input model selector
-      self.inputScrewSelector = ctk.ctkComboBox()
-      self.inputScrewSelector.toolTip = "Select a screw to insert."
-      screwList = ['Select a screw','475x30', '475x35', '475x45', '550x30', '550x40', '550x45', '625x35', '625x40', '625x45', '625x50', '700x35', '700x40', '700x45', '700x50']
-      self.inputScrewSelector.addItems(screwList)
-      self.connect(self.inputScrewSelector, PythonQt.QtCore.SIGNAL('activated(QString)'), self.combo_chosen)
-      self.__layout.addRow("Choose Screw:", self.inputScrewSelector)
-
-       vText = qt.QLabel("1st Instrumented Level:")
-       iText = qt.QLabel("# to Instrument:")
-       aText = qt.QLabel("Approach Direction:")
-       self.vSelector = qt.QComboBox()
-       self.vSelector.setMaximumWidth(120)
-       self.levels = ("C1","C2","C3","C4","C5","C6","C7","T1","T2","T3","T4","T5","T6","T7","T8","T9","T10","T11","T12","L1", "L2", "L3", "L4", "L5","S1")
-       self.vSelector.addItems(self.levels)
-       self.iSelector = qt.QComboBox()
-       self.iSelector.setMaximumWidth(120)
-       self.iSelector.addItems(['1','2','3','4','5','6','7','8','9','10','11','12'])
-       self.aSelector = qt.QComboBox()
-       self.aSelector.setMaximumWidth(120)
-       self.aSelector.addItems(['Posterior','Anterior','Left','Right'])
-       blank = qt.QLabel("  ")
-       blank.setMaximumWidth(30)
-       #self.__layout.addWidget(vText)
-       #self.__layout.addWidget(self.vSelector)
-       #self.__layout.addWidget(iText)
-       #self.__layout.addWidget(self.iSelector)
-
-       self.vertebraeGridBox = qt.QGridLayout()
-       self.vertebraeGridBox.addWidget(vText,0,0)
-       self.vertebraeGridBox.addWidget(self.vSelector,1,0)
-       self.vertebraeGridBox.addWidget(blank,0,1)
-       self.vertebraeGridBox.addWidget(iText,0,2)
-       self.vertebraeGridBox.addWidget(blank,1,1)
-       self.vertebraeGridBox.addWidget(self.iSelector,1,2)
-       self.vertebraeGridBox.addWidget(blank,0,3)
-       self.vertebraeGridBox.addWidget(aText,0,4)
-       self.vertebraeGridBox.addWidget(blank,1,3)
-       self.vertebraeGridBox.addWidget(self.aSelector,1,4)
-       self.__layout.addRow(self.vertebraeGridBox)
-      '''
 
       self.fiducial = ctk.ctkComboBox()
       self.fiducial.toolTip = "Select an insertion site."
@@ -130,12 +74,10 @@ class ScrewStep(PedicleScrewSimulatorStep):
       widthText = qt.QLabel("Screw Width:    ")
       self.length = ctk.ctkComboBox()
       self.length.toolTip = "Select a screw to insert."
-      screwList = ['Select a length (mm)','475', '550','625','700']
+      screwList = ['Select a length (mm)','47.5', '55.0','62.5','70.0']
       self.length.addItems(screwList)
       self.connect(self.length, PythonQt.QtCore.SIGNAL('activated(QString)'), self.length_chosen)
       self.lengthMeasure = qt.QLineEdit()
-      #self.__layout.addRow("Screw Length:", self.length)
-      #self.__layout.addRow("Measured Pedicle Length:", self.lengthMeasure)
       self.__length = ''
 
       self.QHBox1 = qt.QHBoxLayout()
@@ -147,12 +89,10 @@ class ScrewStep(PedicleScrewSimulatorStep):
 
       self.diameter = ctk.ctkComboBox()
       self.diameter.toolTip = "Select a screw to insert."
-      screwList = ['Select a diameter (mm)','30', '35', '45', '50']
+      screwList = ['Select a diameter (mm)','3.0', '3.5', '4.5', '5.0']
       self.diameter.addItems(screwList)
       self.widthMeasure = qt.QLineEdit()
       self.connect(self.diameter, PythonQt.QtCore.SIGNAL('activated(QString)'), self.diameter_chosen)
-      #self.__layout.addRow("Screw Diameter:", self.diameter)
-      #self.__layout.addRow("Measured Pedicle Width:", self.widthMeasure)
       self.__diameter = ''
 
       self.QHBox2 = qt.QHBoxLayout()
@@ -165,12 +105,14 @@ class ScrewStep(PedicleScrewSimulatorStep):
       # Load Screw Button
       self.__loadScrewButton = qt.QPushButton("Load Screw")
       self.__loadScrewButton.enabled = False
+      self.__loadScrewButton.setStyleSheet("background-color: green;")
       #self.__layout.addWidget(self.__loadScrewButton)
       self.__loadScrewButton.connect('clicked(bool)', self.loadScrew)
 
       # Delete Screw Button
       self.__delScrewButton = qt.QPushButton("Delete Screw")
       self.__delScrewButton.enabled = True
+      self.__delScrewButton.setStyleSheet("background-color: red;")
       #self.__layout.addWidget(self.__delScrewButton)
       self.__delScrewButton.connect('clicked(bool)', self.delScrew)
 
@@ -186,7 +128,6 @@ class ScrewStep(PedicleScrewSimulatorStep):
       self.modelNodeSelector.addEnabled = False
       self.modelNodeSelector.removeEnabled = False
       self.modelNodeSelector.setMRMLScene(slicer.mrmlScene)
-      #self.__layout.addRow("Current Screws:", self.modelNodeSelector)
 
       self.transformGrid = qt.QGridLayout()
       vText = qt.QLabel("Vertical Adjustment:")
@@ -217,33 +158,29 @@ class ScrewStep(PedicleScrewSimulatorStep):
       self.transformSlider2.minimum = -45
       self.transformSlider2.maximum = 45
       self.transformSlider2.connect('valueChanged(double)', self.transformSlider2ValueChanged)
-      self.transformSlider2.setMaximumWidth(200)
+      self.transformSlider2.setMinimumHeight(120)
       #self.__layout.addRow("Rotate LR", self.transformSlider2)
       self.transformGrid.addWidget(self.transformSlider2, 1,2)
       self.__layout.addRow(self.transformGrid)
-      '''
-      # Transfors Sliders
-      self.transformSlider3 = ctk.ctkSliderWidget()
-      self.transformSlider3.minimum = 0
-      self.transformSlider3.maximum = 100
-      self.transformSlider3.connect('valueChanged(double)', self.transformSlider3ValueChanged)
-      self.__layout.addRow("Drive Screw", self.transformSlider3)
-      '''
+
       # Insert Screw Button
       self.insertScrewButton = qt.QPushButton("Insert Screw")
       self.insertScrewButton.enabled = True
+      self.insertScrewButton.setStyleSheet("background-color: green;")
       #self.__layout.addWidget(self.__loadScrewButton)
       self.insertScrewButton.connect('clicked(bool)', self.insertScrew)
 
       # Backout Screw Button
       self.backoutScrewButton = qt.QPushButton("Backout Screw")
       self.backoutScrewButton.enabled = False
+      self.backoutScrewButton.setStyleSheet("background-color: red;")
       #self.__layout.addWidget(self.__delScrewButton)
       self.backoutScrewButton.connect('clicked(bool)', self.backoutScrew)
 
       # Reset Screw Button
       self.resetScrewButton = qt.QPushButton("Reset Screw")
       self.resetScrewButton.enabled = True
+      self.resetScrewButton.setStyleSheet("background-color: blue;")
       #self.__layout.addWidget(self.__delScrewButton)
       self.resetScrewButton.connect('clicked(bool)', self.resetScrew)
 
@@ -254,30 +191,13 @@ class ScrewStep(PedicleScrewSimulatorStep):
       self.__layout.addRow(self.QHBox4)
 
       # Hide ROI Details
-      #measurementsTable = ctk.ctkCollapsibleButton()
-      #measurementsTable.text = "Measurements Table"
-      #self.__layout.addWidget(measurementsTable)
-      #measurementsTable.collapsed = True
-
-      '''
-      self.view = qt.QTableView()
-      self.model = qt.QStandardItemModel()
-      self.view.setModel(self.model)
-      item = qt.QStandardItem()
-      item.setText("item")
-      self.model.setItem(0,0,item)
-      self.__layout.addWidget(self.view)
-      '''
-      #self.__layout.addRow(self.screwGridLayout)
-      # self.updateWidgetFromParameters(self.parameterNode())
       qt.QTimer.singleShot(0, self.killButton)
       self.currentFidIndex = self.fiducial.currentIndex
       self.currentFidLabel = self.fiducial.currentText
-      self.fidNode.GetNthFiducialPosition(self.currentFidIndex,self.coords)
+      self.fidNode.GetNthControlPointPosition(self.currentFidIndex,self.coords)
       logging.debug("Coords: {0}".format(self.coords))
       self.updateMeasurements()
       self.cameraFocus(self.coords)
-      #self.screwLandmarks()
 
     def insertScrew(self):
       logging.debug("insert")
@@ -287,7 +207,6 @@ class ScrewStep(PedicleScrewSimulatorStep):
       self.b.enabled = False
       self.transformSlider1.enabled = False
       self.transformSlider2.enabled = False
-      #self.transformSlider3ValueChanged(int(self.__diameter))
 
       temp = self.screwList[self.currentFidIndex]
       temp[3] = "1"
@@ -326,7 +245,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
 
     def screwLandmarks(self):
       self.fiducial = self.fiducialNode()
-      self.fidNumber = self.fiducial.GetNumberOfFiducials()
+      self.fidNumber = self.fiducial.GetNumberOfControlPoints()
       self.fidLabels = []
       self.fidLevels = []
       self.fidSides = []
@@ -343,7 +262,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
     def sliceChange(self):
         pos = [0,0,0]
         if self.fidNode != None:
-          self.fidNode.GetNthFiducialPosition(self.currentFidIndex,pos)
+          self.fidNode.GetNthControlPointPosition(self.currentFidIndex,pos)
 
           lm = slicer.app.layoutManager()
           redWidget = lm.sliceWidget('Red')
@@ -402,7 +321,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
             self.__fiducial = text
             self.currentFidIndex = self.fiducial.currentIndex
             self.currentFidLabel = self.fiducial.currentText
-            self.fidNode.GetNthFiducialPosition(self.currentFidIndex,self.coords)
+            self.fidNode.GetNthControlPointPosition(self.currentFidIndex,self.coords)
             logging.debug("Current fid index = {0}, label = {1}, coords = {2}".format(
               self.currentFidIndex, self.currentFidLabel, self.coords))
             self.updateMeasurements()
@@ -421,12 +340,19 @@ class ScrewStep(PedicleScrewSimulatorStep):
 
     def combo_chosen(self):
         if self.__length != "Select a length (mm)" and self.__diameter != "Select a diameter (mm)":
-          self.screwPath = os.path.join(os.path.dirname(slicer.modules.bart_planning.path), 'Resources/ScrewModels/scaled_' + self.__length + 'x' + self.__diameter + '.vtk')
-          self.screwPath = self.screwPath.replace("\\","/")
-          logging.debug("Screw file path: {0}".format(self.screwPath))
-          self.__loadScrewButton.enabled = True
-          #self.screwName = 'scaled_' + text
-          #self.transformSlider3.maximum = int(self.__diameter)
+            # Remove any '.' in length and diameter
+            sanitized_length = self.__length.replace('.', '')
+            sanitized_diameter = self.__diameter.replace('.', '')
+
+            self.screwPath = os.path.join(
+                os.path.dirname(slicer.modules.bart_planning.path),
+                f'Resources/ScrewModels/scaled_{sanitized_length}x{sanitized_diameter}.vtk'
+            )
+            self.screwPath = self.screwPath.replace("\\", "/")
+            logging.debug("Screw file path: {0}".format(self.screwPath))
+            self.__loadScrewButton.enabled = True
+            # self.screwName = 'scaled_' + text
+            # self.transformSlider3.maximum = int(self.__diameter)
 
     def loadScrew(self):
         logging.debug("load screw button")
@@ -456,13 +382,15 @@ class ScrewStep(PedicleScrewSimulatorStep):
         screwModel.SetName('Screw at point %s' % self.currentFidLabel)
         screwModel.SetAndObserveTransformNodeID(transformScrewTemp.GetID())
 
+        self.addLineAlignedWithScrew(screwModel)
+
         modelDisplay = screwModel.GetDisplayNode()
         modelDisplay.SetColor(0.12,0.73,0.91)
         modelDisplay.SetDiffuse(0.90)
         modelDisplay.SetAmbient(0.10)
         modelDisplay.SetSpecular(0.20)
         modelDisplay.SetPower(10.0)
-        modelDisplay.SetSliceIntersectionVisibility(True)
+        modelDisplay.SetVisibility2D(True)
         screwModel.SetAndObserveDisplayNodeID(modelDisplay.GetID())
 
         screwDescrip[0] = self.currentFidLabel
@@ -497,9 +425,10 @@ class ScrewStep(PedicleScrewSimulatorStep):
           coords = [0,0,0]
           observer.GetFiducialCoordinates(coords)
 
+          matrixScrew = vtk.vtkMatrix4x4()
           transformFid = slicer.mrmlScene.GetFirstNodeByName('Transform-%s' % observer.GetName())
 
-          matrixScrew = transformFid.GetMatrixTransformToParent()
+          matrixScrew = transformFid.GetMatrixTransformToParent(matrixScrew)
           matrixScrew.SetElement(0,3,coords[0])
           matrixScrew.SetElement(1,3,coords[1])
           matrixScrew.SetElement(2,3,coords[2])
@@ -507,8 +436,64 @@ class ScrewStep(PedicleScrewSimulatorStep):
 
           transformFid.UpdateScene(slicer.mrmlScene)
           self.sliceChange()
+
+          screwModel = slicer.mrmlScene.GetFirstNodeByName(f"Screw at point {self.currentFidLabel}")
+          if screwModel:
+              self.addLineAlignedWithScrew(screwModel)
         else:
           return
+
+    def addLineAlignedWithScrew(self, screwNode):
+        """
+        Adds a line that aligns with the screw node.
+
+        Parameters:
+            screwNode: vtkMRMLModelNode
+                The screw model node loaded in the scene.
+        """
+
+        # Remove old line node if present
+        existingLineNode = slicer.mrmlScene.GetFirstNodeByName("Screw Alignment Line")
+        if existingLineNode:
+            slicer.mrmlScene.RemoveNode(existingLineNode)
+
+        # Get screw transform to world
+        screwTransformMatrix = vtk.vtkMatrix4x4()
+        screwTransformNode = screwNode.GetParentTransformNode()
+        if screwTransformNode:
+            screwTransformNode.GetMatrixTransformToWorld(screwTransformMatrix)
+        else:
+            screwTransformMatrix.Identity()
+
+        # Extract position and direction
+        screwPosition = [screwTransformMatrix.GetElement(i, 3) for i in range(3)]
+        screwDirection = [screwTransformMatrix.GetElement(i, 1) for i in range(3)]
+
+        # Define line endpoints
+        lineLength = 100.0
+        startPoint = [screwPosition[i] - lineLength * screwDirection[i] for i in range(3)]
+        endPoint = [screwPosition[i] + lineLength * screwDirection[i] for i in range(3)]
+
+        # Create a line source
+        lineSource = vtk.vtkLineSource()
+        lineSource.SetPoint1(startPoint)
+        lineSource.SetPoint2(endPoint)
+        lineSource.Update()
+
+        # Create model node
+        lineModelNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "Screw Alignment Line")
+        lineModelNode.SetAndObservePolyData(lineSource.GetOutput())
+
+        # Create display node
+        lineDisplayNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelDisplayNode")
+        lineDisplayNode.SetColor(1, 0, 0)  # red
+        lineDisplayNode.SetLineWidth(3)
+        lineDisplayNode.SetVisibility2D(True)
+        # Key step: show full line in slice
+        lineDisplayNode.SetSliceDisplayModeToProjection()
+
+        # Link display node to model node
+        lineModelNode.SetAndObserveDisplayNodeID(lineDisplayNode.GetID())
 
     def cameraFocus(self, position):
       camera = slicer.mrmlScene.GetNodeByID('vtkMRMLCameraNode1')
@@ -601,12 +586,14 @@ class ScrewStep(PedicleScrewSimulatorStep):
 
 
     def driveScrew(self):
-        if self.screwInsert < int(self.__diameter):
+        sanitized_length = self.__length.replace('.', '')
+        sanitized_diameter = self.__diameter.replace('.', '')
+        if self.screwInsert < int(sanitized_diameter):
 
             value = self.screwInsert
             # attempt to rotate with driving
 
-            angle3 = math.pi / 180.0 * 72 #((360/2.5)*self.screwInsert)
+            angle3 = math.radians(72) #((360/2.5)*self.screwInsert)
 
             matrix3 = vtk.vtkMatrix3x3()
             matrix3.DeepCopy([ math.cos(angle3), 0, -math.sin(angle3),
@@ -615,203 +602,212 @@ class ScrewStep(PedicleScrewSimulatorStep):
 
             self.transformScrewComposite(matrix3)
 
+            # Reverse direction for translation
+            value = -value
+            transformFid = slicer.mrmlScene.GetFirstNodeByName(f'Transform-{self.currentFidLabel}')
+            if transformFid is not None:
+                # Get the current transformation matrix
+                matrixScrew = vtk.vtkMatrix4x4()
+                transformFid.GetMatrixTransformToParent(matrixScrew)
 
-            value = value*-1
-            transformFid = slicer.mrmlScene.GetFirstNodeByName('Transform-%s' % self.currentFidLabel)
+                # Calculate new translation
+                newVal = value - self.driveTemp
+                drive1 = matrixScrew.GetElement(0, 1)
+                drive2 = matrixScrew.GetElement(1, 1)
+                drive3 = matrixScrew.GetElement(2, 1)
 
-            matrixScrew = transformFid.GetMatrixTransformToParent()
+                coord1 = drive1 * newVal + matrixScrew.GetElement(0, 3)
+                coord2 = drive2 * newVal + matrixScrew.GetElement(1, 3)
+                coord3 = drive3 * newVal + matrixScrew.GetElement(2, 3)
 
-            newVal = value - self.driveTemp
+                # Update translation in the matrix
+                matrixScrew.SetElement(0, 3, coord1)
+                matrixScrew.SetElement(1, 3, coord2)
+                matrixScrew.SetElement(2, 3, coord3)
 
-            drive1 = matrixScrew.GetElement(0,1)
-            drive2 = matrixScrew.GetElement(1,1)
-            drive3 = matrixScrew.GetElement(2,1)
+                # Apply the updated transformation matrix
+                transformFid.SetMatrixTransformToParent(matrixScrew)
 
-            coord1 = drive1 * newVal + matrixScrew.GetElement(0,3)
-            coord2 = drive2 * newVal + matrixScrew.GetElement(1,3)
-            coord3 = drive3 * newVal + matrixScrew.GetElement(2,3)
+                # Notify Slicer of changes
+                slicer.mrmlScene.Modified()
 
-            matrixScrew.SetElement(0,3,coord1)
-            matrixScrew.SetElement(1,3,coord2)
-            matrixScrew.SetElement(2,3,coord3)
-
-            transformFid.SetMatrixTransformToParent(matrixScrew)
-
-            #transformFid.UpdateScene(slicer.mrmlScene)
-            #self.delayDisplay(transformFid.UpdateScene(slicer.mrmlScene), 2000)
-            self.driveTemp = value
-            self.screwInsert += 1
+                # Update state variables
+                self.driveTemp = value
+                self.screwInsert += 1
+            else:
+                slicer.util.errorDisplay(f"Transform node 'Transform-{self.currentFidLabel}' not found.")
         else:
+            # Stop the timer and reset variables
             self.timer.stop()
             self.screwInsert = 0.0
             self.driveTemp = 0
-        '''
-        angle3 = math.pi / 180.0 * (value*50)
 
-        matrix3 = vtk.vtkMatrix3x3()
-        matrix3.DeepCopy([ math.cos(angle3), 0, -math.sin(angle3),
-                          0, 1, 0,
-                          math.sin(angle3), 0, math.cos(angle3)])
-
-        self.transformScrewComposite(matrix3)
-
-
-        value = value*-1
-        transformFid = slicer.mrmlScene.GetFirstNodeByName('Transform-%s' % self.currentFidLabel)
-
-        matrixScrew = transformFid.GetMatrixTransformToParent()
-
-        newVal = value - self.driveTemp
-
-        drive1 = matrixScrew.GetElement(0,1)
-        drive2 = matrixScrew.GetElement(1,1)
-        drive3 = matrixScrew.GetElement(2,1)
-
-        coord1 = drive1 * newVal + matrixScrew.GetElement(0,3)
-        coord2 = drive2 * newVal + matrixScrew.GetElement(1,3)
-        coord3 = drive3 * newVal + matrixScrew.GetElement(2,3)
-
-        matrixScrew.SetElement(0,3,coord1)
-        matrixScrew.SetElement(1,3,coord2)
-        matrixScrew.SetElement(2,3,coord3)
-
-        transformFid.SetMatrixTransformToParent(matrixScrew)
-
-        transformFid.UpdateScene(slicer.mrmlScene)
-
-        self.driveTemp = value
-        '''
     def reverseScrew(self):
-        if self.screwInsert < int(self.__diameter):
+        sanitized_length = self.__length.replace('.', '')
+        sanitized_diameter = self.__diameter.replace('.', '')
+        if self.screwInsert < int(sanitized_diameter):
 
             value = self.screwInsert
-            # attempt to rotate with driving
+            # Calculate the reverse rotation angle (convert degrees to radians, negative for reverse)
+            angle3 = math.radians(-72)  # Adjust rotation angle as needed
 
-            angle3 = math.pi / 180.0 * -72 #((360/2.5)*self.screwInsert)
+            # Create a 4x4 rotation matrix
+            matrix3 = vtk.vtkMatrix4x4()
+            matrix3.Identity()  # Initialize to identity matrix
+            matrix3.SetElement(0, 0, math.cos(angle3))
+            matrix3.SetElement(0, 2, -math.sin(angle3))
+            matrix3.SetElement(2, 0, math.sin(angle3))
+            matrix3.SetElement(2, 2, math.cos(angle3))
 
-            matrix3 = vtk.vtkMatrix3x3()
-            matrix3.DeepCopy([ math.cos(angle3), 0, -math.sin(angle3),
-                          0, 1, 0,
-                          math.sin(angle3), 0, math.cos(angle3)])
-
+            # Apply reverse rotation transformation
             self.transformScrewComposite(matrix3)
 
-            transformFid = slicer.mrmlScene.GetFirstNodeByName('Transform-%s' % self.currentFidLabel)
+            # Get the transform node for the screw
+            transformFid = slicer.mrmlScene.GetFirstNodeByName(f'Transform-{self.currentFidLabel}')
+            if transformFid is not None:
+                # Retrieve the current transformation matrix
+                matrixScrew = vtk.vtkMatrix4x4()
+                transformFid.GetMatrixTransformToParent(matrixScrew)
 
-            matrixScrew = transformFid.GetMatrixTransformToParent()
+                # Calculate translation in reverse direction
+                # Calculate translation in reverse direction
+                newVal = value - self.driveTemp
 
-            newVal = value - self.driveTemp
+                drive1 = matrixScrew.GetElement(0, 1)
+                drive2 = matrixScrew.GetElement(1, 1)
+                drive3 = matrixScrew.GetElement(2, 1)
 
-            drive1 = matrixScrew.GetElement(0,1)
-            drive2 = matrixScrew.GetElement(1,1)
-            drive3 = matrixScrew.GetElement(2,1)
+                # Log intermediate values for debugging
+                logging.debug(f"newVal: {newVal}, value: {value}, driveTemp: {self.driveTemp}")
 
-            coord1 = drive1 * newVal + matrixScrew.GetElement(0,3)
-            coord2 = drive2 * newVal + matrixScrew.GetElement(1,3)
-            coord3 = drive3 * newVal + matrixScrew.GetElement(2,3)
+                # Normalize the direction vector
+                direction_length = math.sqrt(drive1 ** 2 + drive2 ** 2 + drive3 ** 2)
+                if direction_length > 0:
+                    drive1 /= direction_length
+                    drive2 /= direction_length
+                    drive3 /= direction_length
 
-            matrixScrew.SetElement(0,3,coord1)
-            matrixScrew.SetElement(1,3,coord2)
-            matrixScrew.SetElement(2,3,coord3)
+                # Compute new translation coordinates
+                coord1 = drive1 * newVal + matrixScrew.GetElement(0, 3)
+                coord2 = drive2 * newVal + matrixScrew.GetElement(1, 3)
+                coord3 = drive3 * newVal + matrixScrew.GetElement(2, 3)
 
-            transformFid.SetMatrixTransformToParent(matrixScrew)
+                # Update the matrix
+                matrixScrew.SetElement(0, 3, coord1)
+                matrixScrew.SetElement(1, 3, coord2)
+                matrixScrew.SetElement(2, 3, coord3)
 
-            #transformFid.UpdateScene(slicer.mrmlScene)
-            #self.delayDisplay(transformFid.UpdateScene(slicer.mrmlScene), 2000)
-            self.driveTemp = value
-            self.screwInsert += 1
+                # Apply the updated transformation matrix
+                transformFid.SetMatrixTransformToParent(matrixScrew)
+
+                # Notify Slicer of changes
+                slicer.mrmlScene.Modified()
+
+                # Update state variables
+                self.driveTemp = value
+                self.screwInsert += 1
         else:
+            # Stop the reverse timer and reset variables
             self.timer2.stop()
             self.screwInsert = 0.0
             self.driveTemp = 0
 
     def resetOrientation(self):
-
+        # Reset sliders to initial values
         self.transformSlider1.setValue(0)
         self.transformSlider2.reset()
 
-        transformFid = slicer.mrmlScene.GetFirstNodeByName('Transform-%s' % self.currentFidLabel)
+        # Retrieve the transform node
+        transformFid = slicer.mrmlScene.GetFirstNodeByName(f'Transform-{self.currentFidLabel}')
+        if transformFid is not None:
+            # Initialize a new transformation matrix
+            matrixScrew = vtk.vtkMatrix4x4()
 
-        matrixScrew = transformFid.GetMatrixTransformToParent()
+            # Reset the rotation matrix to identity (or desired orientation)
+            matrixScrew.Identity()
+            matrixScrew.SetElement(0, 0, 1)
+            matrixScrew.SetElement(0, 1, 0)
+            matrixScrew.SetElement(0, 2, 0)
 
-        matrixScrew.SetElement(0,0,1)
-        matrixScrew.SetElement(0,1,0)
-        matrixScrew.SetElement(0,2,0)
+            matrixScrew.SetElement(1, 0, 0)
+            matrixScrew.SetElement(1, 1, -1)  # Adjusted for desired orientation
+            matrixScrew.SetElement(1, 2, 0)
 
-        matrixScrew.SetElement(1,0,0)
-        matrixScrew.SetElement(1,1,-1)
-        matrixScrew.SetElement(1,2,0)
+            matrixScrew.SetElement(2, 0, 0)
+            matrixScrew.SetElement(2, 1, 0)
+            matrixScrew.SetElement(2, 2, -1)
 
-        matrixScrew.SetElement(2,0,0)
-        matrixScrew.SetElement(2,1,0)
-        matrixScrew.SetElement(2,2,-1)
+            # Set the translation components to stored coordinates
+            matrixScrew.SetElement(0, 3, self.coords[0])
+            matrixScrew.SetElement(1, 3, self.coords[1])
+            matrixScrew.SetElement(2, 3, self.coords[2])
 
-        matrixScrew.SetElement(0,3,self.coords[0])
-        matrixScrew.SetElement(1,3,self.coords[1])
-        matrixScrew.SetElement(2,3,self.coords[2])
+            # Apply the transformation matrix
+            transformFid.SetMatrixTransformToParent(matrixScrew)
 
-        transformFid.SetMatrixTransformToParent(matrixScrew)
+            # Notify Slicer of scene changes
+            slicer.mrmlScene.Modified()
 
-        transformFid.UpdateScene(slicer.mrmlScene)
-
+        # Update UI elements
         self.backoutScrewButton.enabled = False
         self.insertScrewButton.enabled = True
 
         self.transformSlider1.enabled = True
         self.transformSlider2.enabled = True
         self.b.enabled = True
-        #self.transformSlider3.reset()
+        # Uncomment and reset the third slider if applicable
+        # self.transformSlider3.reset()
 
     def transformScrewComposite(self, inputMatrix):
+        # Retrieve the transform node
+        transformFid = slicer.mrmlScene.GetFirstNodeByName(f'Transform-{self.currentFidLabel}')
+        if transformFid is not None:
+            # Get the current transformation matrix
+            matrixScrew = vtk.vtkMatrix4x4()
+            transformFid.GetMatrixTransformToParent(matrixScrew)
+            screwModel = slicer.mrmlScene.GetFirstNodeByName(f"Screw at point {self.currentFidLabel}")
+            if screwModel:
+                self.addLineAlignedWithScrew(screwModel)
 
-        transformFid = slicer.mrmlScene.GetFirstNodeByName('Transform-%s' % self.currentFidLabel)
+            # Extract the 3x3 rotation matrix from the 4x4 matrix
+            currentRotation = vtk.vtkMatrix3x3()
+            for i in range(3):
+                for j in range(3):
+                    currentRotation.SetElement(i, j, matrixScrew.GetElement(i, j))
 
-        matrixScrew = transformFid.GetMatrixTransformToParent()
+            # Extract the 3x3 part of the inputMatrix
+            inputRotation = vtk.vtkMatrix3x3()
+            for i in range(3):
+                for j in range(3):
+                    inputRotation.SetElement(i, j, inputMatrix.GetElement(i, j))
 
-        newMatrix = vtk.vtkMatrix3x3()
-        outputMatrix = vtk.vtkMatrix3x3()
+            # Prepare the output 3x3 matrix for the resulting rotation
+            outputRotation = vtk.vtkMatrix3x3()
 
-        newMatrix.SetElement(0,0,matrixScrew.GetElement(0,0))
-        newMatrix.SetElement(0,1,matrixScrew.GetElement(0,1))
-        newMatrix.SetElement(0,2,matrixScrew.GetElement(0,2))
+            # Perform the multiplication of the rotation matrices
+            vtk.vtkMatrix3x3.Multiply3x3(currentRotation, inputRotation, outputRotation)
 
-        newMatrix.SetElement(1,0,matrixScrew.GetElement(1,0))
-        newMatrix.SetElement(1,1,matrixScrew.GetElement(1,1))
-        newMatrix.SetElement(1,2,matrixScrew.GetElement(1,2))
+            # Update the 4x4 transformation matrix with the resulting 3x3 rotation
+            for i in range(3):
+                for j in range(3):
+                    matrixScrew.SetElement(i, j, outputRotation.GetElement(i, j))
 
-        newMatrix.SetElement(2,0,matrixScrew.GetElement(2,0))
-        newMatrix.SetElement(2,1,matrixScrew.GetElement(2,1))
-        newMatrix.SetElement(2,2,matrixScrew.GetElement(2,2))
+            # Ensure the translation components remain unchanged
+            # (They are already preserved as part of `matrixScrew`.)
 
-        vtk.vtkMatrix3x3.Multiply3x3(newMatrix, inputMatrix, outputMatrix)
+            # Ensure the homogeneous coordinate row remains consistent
+            matrixScrew.SetElement(3, 0, 0)
+            matrixScrew.SetElement(3, 1, 0)
+            matrixScrew.SetElement(3, 2, 0)
+            matrixScrew.SetElement(3, 3, 1)
 
-        #coords = [0,0,0]
-        #self.fid.GetFiducialCoordinates(coords)
+            # Apply the updated matrix to the transform node
+            transformFid.SetMatrixTransformToParent(matrixScrew)
 
-        matrixScrew.SetElement(0,0,outputMatrix.GetElement(0,0))
-        matrixScrew.SetElement(0,1,outputMatrix.GetElement(0,1))
-        matrixScrew.SetElement(0,2,outputMatrix.GetElement(0,2))
-        #matrixScrew.SetElement(0,3,self.coords[0])
-
-        matrixScrew.SetElement(1,0,outputMatrix.GetElement(1,0))
-        matrixScrew.SetElement(1,1,outputMatrix.GetElement(1,1))
-        matrixScrew.SetElement(1,2,outputMatrix.GetElement(1,2))
-        #matrixScrew.SetElement(1,3,self.coords[1])
-
-        matrixScrew.SetElement(2,0,outputMatrix.GetElement(2,0))
-        matrixScrew.SetElement(2,1,outputMatrix.GetElement(2,1))
-        matrixScrew.SetElement(2,2,outputMatrix.GetElement(2,2))
-        #matrixScrew.SetElement(2,3,self.coords[2])
-
-        matrixScrew.SetElement(3,0,0)
-        matrixScrew.SetElement(3,1,0)
-        matrixScrew.SetElement(3,2,0)
-        matrixScrew.SetElement(3,3,1)
-
-        transformFid.SetMatrixTransformToParent(matrixScrew)
-
-        transformFid.UpdateScene(slicer.mrmlScene)
-
+            # Notify Slicer of changes
+            slicer.mrmlScene.Modified()
+        else:
+            slicer.util.errorDisplay(f"Transform node 'Transform-{self.currentFidLabel}' not found.")
 
     def validate( self, desiredBranchId ):
 
@@ -829,8 +825,8 @@ class ScrewStep(PedicleScrewSimulatorStep):
       self.fidNode.SetLocked(1)
       slicer.modules.models.logic().SetAllModelsVisibility(1)
 
-      for x in range (0,self.fidNode.GetNumberOfFiducials()):
-        label = self.fidNode.GetNthFiducialLabel(x)
+      for x in range (0,self.fidNode.GetNumberOfControlPoints()):
+        label = self.fidNode.GetNthControlPointLabel(x)
         level = slicer.modules.BART_PlanningWidget.landmarksStep.table2.cellWidget(x,1).currentText
         side = slicer.modules.BART_PlanningWidget.landmarksStep.table2.cellWidget(x,2).currentText
         self.fiduciallist.append(label + " / " + level + " / " + side)
@@ -848,7 +844,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
       lm = slicer.app.layoutManager()
       if lm == None:
         return
-      lm.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUp3DView)
+      lm.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
 
       pNode = self.parameterNode()
       pNode.SetParameter('currentStep', self.stepid)
@@ -886,6 +882,11 @@ class ScrewStep(PedicleScrewSimulatorStep):
           self.fidNode.SetLocked(0)
 
       if goingTo.id() == 'Grade':
+        lineModelNode = slicer.util.getNode("Screw Alignment Line*")
+        if lineModelNode:
+            lineDisplayNode = lineModelNode.GetDisplayNode()
+            if lineDisplayNode:
+                lineDisplayNode.SetVisibility(False)
 
         self.doStepProcessing()
 

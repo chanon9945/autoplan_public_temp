@@ -1,4 +1,4 @@
-from __main__ import qt, ctk, vtk, slicer
+import qt, ctk, vtk, slicer
 
 from .PedicleScrewSimulatorStep import *
 from .Helper import *
@@ -14,10 +14,12 @@ class LandmarksStep( PedicleScrewSimulatorStep ):
 
       self.__parent = super( LandmarksStep, self )
       qt.QTimer.singleShot(0, self.killButton)
-      self.levels = ("C1","C2","C3","C4","C5","C6","C7","T1","T2","T3","T4","T5","T6","T7","T8","T9","T10","T11","T12","L1", "L2", "L3", "L4", "L5","S1")
+      self.levels = ("L1", "L2", "L3", "L4", "L5")
       self.startCount = 0
       self.addCount = 0
       self.fiducialNodeObservations = []
+      self.fidMoveObserverTag = None
+
 
     def killButton(self):
       # hide useless button
@@ -69,154 +71,150 @@ class LandmarksStep( PedicleScrewSimulatorStep ):
           self.fiducial = self.fiducialNode()
           self.fiducial.GetNthControlPointPosition(currentFid,position)
           logging.debug(position)
-          self.cameraFocus(position)
+          # self.cameraFocus(position)
 
 
     def updateTable(self):
-      #logging.debug(pNode.GetParameter('vertebrae'))
-      self.fiducial = self.fiducialNode()
-      self.fidNumber = self.fiducial.GetNumberOfDefinedControlPoints()
-      logging.debug(self.fidNumber)
-      self.fidLabels = []
-      self.items = []
-      self.Label = qt.QTableWidgetItem()
+        self.fiducial = self.fiducialNode()
+        self.fidNumber = self.fiducial.GetNumberOfDefinedControlPoints()
+        self.table2.setRowCount(self.fidNumber)
 
-      self.table2.setRowCount(self.fidNumber)
+        for i in range(self.fidNumber):
+            fidLabel = self.fiducial.GetNthControlPointLabel(i)
 
+            # Create the label in column 0
+            labelItem = qt.QTableWidgetItem(fidLabel)
+            self.table2.setItem(i, 0, labelItem)
 
-      for i in range(0,self.fidNumber):
-          self.Label = qt.QTableWidgetItem(self.fiducial.GetNthControlPointLabel(i))
-          self.items.append(self.Label)
-          self.table2.setItem(i, 0, self.Label)
-          self.comboLevel = qt.QComboBox()
-          self.comboLevel.addItems(self.levelselection)
-          self.comboSide = qt.QComboBox()
-          self.comboSide.addItems(["Left","Right"])
-          self.table2.setCellWidget(i,1, self.comboLevel)
-          self.table2.setCellWidget(i,2, self.comboSide)
-      logging.debug(self.Label.text())
+            # Create combo for Level
+            comboLevel = qt.QComboBox()
+            comboLevel.addItems(self.levelselection)
+            attrLevel = self.fiducial.GetAttribute(f"{fidLabel}_Level")
+            if attrLevel in self.levelselection:
+                comboLevel.setCurrentText(attrLevel)
+            # Connect
+            comboLevel.connect("currentIndexChanged(int)", lambda idx, fi=i: self.onLevelChanged(idx, fi))
+
+            # Create combo for Side
+            comboSide = qt.QComboBox()
+            comboSide.addItems(["Left", "Right"])
+            attrSide = self.fiducial.GetAttribute(f"{fidLabel}_Side")
+            if attrSide in ["Left", "Right"]:
+                comboSide.setCurrentText(attrSide)
+            # Connect
+            comboSide.connect("currentIndexChanged(int)", lambda idx, fi=i: self.onSideChanged(idx, fi))
+
+            # Place them in the table
+            self.table2.setCellWidget(i, 1, comboLevel)
+            self.table2.setCellWidget(i, 2, comboSide)
+
+    def onLevelChanged(self, index, fidIndex):
+        fidLabel = self.fiducial.GetNthControlPointLabel(fidIndex)
+        chosenText = self.table2.cellWidget(fidIndex, 1).currentText
+        self.fiducial.SetAttribute(f"{fidLabel}_Level", chosenText)
+
+    def onSideChanged(self, index, fidIndex):
+        fidLabel = self.fiducial.GetNthControlPointLabel(fidIndex)
+        chosenText = self.table2.cellWidget(fidIndex, 2).currentText
+        self.fiducial.SetAttribute(f"{fidLabel}_Side", chosenText)
 
     def deleteFiducial(self):
-      if self.table2.currentColumn() == 0:
-          item = self.table2.currentItem()
-          self.fidNumber = self.fiducial.GetNumberOfDefinedControlPoints()
-          self.fiducial = self.fiducialNode()
-          for i in range(0,self.fidNumber):
-              if item.text() == self.fiducial.GetNthControlPointLabel(i):
-                  deleteIndex = i
-          self.fiducial.RemoveMarkup(deleteIndex)
-          deleteIndex = -1
+        if self.table2.currentColumn() == 0:
+            item = self.table2.currentItem()
+            if not item:
+                return  # Exit if no item is selected
 
-          logging.debug(self.table2.currentRow())
-          row = self.table2.currentRow()
-          self.table2.removeRow(row)
+            self.fidNumber = self.fiducial.GetNumberOfDefinedControlPoints()
+            self.fiducial = self.fiducialNode()
+
+            deleteIndex = -1
+            for i in range(self.fidNumber):
+                label = self.fiducial.GetNthControlPointLabel(i)
+                if label and item.text() == label:
+                    deleteIndex = i
+                    break
+
+            if deleteIndex != -1:
+                # Remove the corresponding fiducial
+                self.fiducial.RemoveNthControlPoint(deleteIndex)
+
+            # Remove the corresponding row from the table
+            row = self.table2.currentRow()
+            if row != -1:
+                self.table2.removeRow(row)
 
     def lockFiducials(self):
       fidNode = self.fiducialNode()
-      slicer.modules.markups.logic().SetAllMarkupsLocked(fidNode,True)
+      slicer.modules.markups.logic().SetAllControlPointsLocked(fidNode,True)
 
     def addFiducials(self):
       pass
 
     def addFiducialToTable(self, observer, event):
-      logging.debug("Modified - {0}".format(event))
-      self.fiducial = self.fiducialNode()
-      self.fidNumber = self.fiducial.GetNumberOfDefinedControlPoints()
-      slicer.modules.markups.logic().SetAllControlPointsVisibility(self.fiducial,1)
-      logging.debug(self.fidNumber)
-      self.fidLabels = []
-      self.items = []
-      self.Label = qt.QTableWidgetItem()
-
-      self.table2.setRowCount(self.fidNumber)
-
-
-      for i in range(0,self.fidNumber):
-          self.Label = qt.QTableWidgetItem(self.fiducial.GetNthControlPointLabel(i))
-          self.items.append(self.Label)
-          self.table2.setItem(i, 0, self.Label)
-          self.comboLevel = qt.QComboBox()
-          self.comboLevel.addItems(self.levelselection)
-          self.comboSide = qt.QComboBox()
-          self.comboSide.addItems(["Left","Right"])
-          self.table2.setCellWidget(i,1, self.comboLevel)
-          self.table2.setCellWidget(i,2, self.comboSide)
-          if i == 0 or i == 1:
-            self.table2.cellWidget(i,1).setCurrentIndex(0)
-            if i == 1:
-              self.table2.cellWidget(i,2).setCurrentIndex(1)
-          elif i == 2 or i == 3:
-            self.table2.cellWidget(i,1).setCurrentIndex(1)
-            if i == 3:
-              self.table2.cellWidget(i,2).setCurrentIndex(1)
-          elif i == 4 or i == 5:
-            self.table2.cellWidget(i,1).setCurrentIndex(2)
-            if i == 5:
-              self.table2.cellWidget(i,2).setCurrentIndex(1)
-
-      #self.addCount = self.addCount + 1
+      self.updateTable()
 
     def createUserInterface( self ):
       markup = slicer.modules.markups.logic()
       markup.AddNewFiducialNode()
-
-
-
+      # Create the main layout
       self.__layout = self.__parent.createUserInterface()
+
+      # Create the markups place widget
       self.startMeasurements = slicer.qSlicerMarkupsPlaceWidget()
       self.startMeasurements.setButtonsVisible(False)
       self.startMeasurements.placeButton().show()
       self.startMeasurements.setMRMLScene(slicer.mrmlScene)
       self.startMeasurements.placeMultipleMarkups = slicer.qSlicerMarkupsPlaceWidget.ForcePlaceMultipleMarkups
-      self.startMeasurements.connect('activeMarkupsFiducialPlaceModeChanged(bool)', self.addFiducials)
-      #self.__layout.addWidget(self.startMeasurements)
 
-      #self.updateTable2 = qt.QPushButton("Update Table")
-      #self.updateTable2.connect('clicked(bool)', self.updateTable)
-      #self.__layout.addWidget(self.updateTable2)
+      # Style the button with dynamic colors based on active mode
+      def updateButtonStyle(isActive):
+          if isActive:
+              # Active = Green
+              self.startMeasurements.placeButton().setStyleSheet(
+                  "background-color: green;"
+              )
+          else:
+              # Inactive = Red
+              self.startMeasurements.placeButton().setStyleSheet(
+                  "background-color: red;"
+              )
+
+      # Initialize the button style to inactive (red)
+      updateButtonStyle(False)
+
+      # Connect to the same signal that indicates a change in the active placing mode
+      self.startMeasurements.connect('activeMarkupsFiducialPlaceModeChanged(bool)', updateButtonStyle)
+      self.startMeasurements.connect('activeMarkupsFiducialPlaceModeChanged(bool)', self.addFiducials)
 
       buttonLayout = qt.QHBoxLayout()
       buttonLayout.addWidget(self.startMeasurements)
-      #buttonLayout.addWidget(self.stopMeasurements)
-      #buttonLayout.addWidget(self.updateTable2)
       self.__layout.addRow(buttonLayout)
 
-      '''
-      # Table Output of Fiducial List (Slicer 4.3 Markups)
-      tableDescription = qt.QLabel('List of Points Added to Scene:')
-      self.__layout.addRow(tableDescription)
-      self.__markupWidget = slicer.modules.markups.createNewWidgetRepresentation()
-      slicer.modules.markups.logic().AddNewFiducialNode()
-      self.__markupWidget.onActiveMarkupMRMLNodeChanged(0)
-      self.table = self.__markupWidget.findChild('QTableWidget')
-      self.table.hideColumn(0)
-      self.table.hideColumn(1)
-      self.table.hideColumn(2)
-      self.table.setMinimumHeight(100)
-      self.table.setMaximumHeight(170)
-      self.table.setMinimumWidth(400)
-      self.table.setMaximumWidth(447)
-      self.table.resize(400,170)
-      self.__layout.addWidget(self.table)
-      '''
+      # Fiducial Table
       self.table2 = qt.QTableWidget()
       self.table2.setRowCount(1)
       self.table2.setColumnCount(3)
       self.table2.horizontalHeader().setSectionResizeMode(qt.QHeaderView.Stretch)
-      self.table2.setSizePolicy (qt.QSizePolicy.MinimumExpanding, qt.QSizePolicy.Preferred)
+      self.table2.setSizePolicy(qt.QSizePolicy.MinimumExpanding, qt.QSizePolicy.Preferred)
       self.table2.setMinimumWidth(400)
       self.table2.setMinimumHeight(215)
       self.table2.setMaximumHeight(215)
-      horizontalHeaders = ["Fiducial","Level","Side"]
+      self.table2.setStyleSheet(
+          "QTableWidget {"
+          "background-color: #2C2C2C; border: 1px solid #DDDDDD; font-size: 13px; padding: 5px;"
+          "}"
+          "QHeaderView::section {"
+          "background-color: #1484CD; color: white; font-weight: bold; border: 1px solid #DDDDDD;"
+          "}"
+      )
+      horizontalHeaders = ["Fiducial", "Level", "Side"]
       self.table2.setHorizontalHeaderLabels(horizontalHeaders)
       self.table2.itemSelectionChanged.connect(self.onTableCellClicked)
       self.__layout.addWidget(self.table2)
 
-
       self.deleteFid = qt.QPushButton("Remove Selected Fiducial")
       self.deleteFid.connect('clicked(bool)', self.deleteFiducial)
       self.__layout.addWidget(self.deleteFid)
-
 
       # Camera Transform Sliders
 
@@ -248,36 +246,38 @@ class LandmarksStep( PedicleScrewSimulatorStep ):
       lm = slicer.app.layoutManager()
       if lm == None:
         return
-      lm.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUp3DView)
+      lm.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
 
       pNode = self.parameterNode()
       logging.debug(pNode)
-      self.levelselection = []
-      self.vertebra = str(pNode.GetParameter('vertebra'))
-      self.inst_length = str(pNode.GetParameter('inst_length'))
-      self.approach = str(pNode.GetParameter('approach'))
-      for i in range(self.levels.index(self.vertebra),self.levels.index(self.vertebra)+int(self.inst_length)):
-          #logging.debug(self.levels[i])
-          self.levelselection.append(self.levels[i])
-      logging.debug(self.levelselection)
+      self.levelselection = ["L1", "L2", "L3", "L4", "L5"]
+      # self.vertebra = str(pNode.GetParameter('vertebra'))
+      # self.inst_length = str(pNode.GetParameter('inst_length'))
+      # self.approach = str(pNode.GetParameter('approach'))
+      # for i in range(self.levels.index(self.vertebra),self.levels.index(self.vertebra)+int(self.inst_length)):
+      #     #logging.debug(self.levels[i])
+      #     self.levelselection.append(self.levels[i])
+      # logging.debug(self.levelselection)
 
       camera = slicer.mrmlScene.GetNodeByID('vtkMRMLCameraNode1')
-      if self.approach == 'Posterior':
-          logging.debug("posterior")
-          camera.SetPosition(0,-600,0)
-          camera.SetViewUp([0,0,1])
-      elif self.approach == 'Anterior':
-          logging.debug("Anterior")
-          camera.SetPosition(0,600,0)
-          camera.SetViewUp([0,0,1])
-      elif self.approach == 'Left':
-          logging.debug("Left")
-          camera.SetPosition(-600,0,0)
-          camera.SetViewUp([0,0,1])
-      elif self.approach == 'Right':
-          logging.debug("Right")
-          camera.SetPosition(600,0,0)
-          camera.SetViewUp([0,0,1])
+      camera.SetPosition(0, -600, 0)
+      camera.SetViewUp([0, 0, 1])
+      # if self.approach == 'Posterior':
+      #     logging.debug("posterior")
+      #     camera.SetPosition(0,-600,0)
+      #     camera.SetViewUp([0,0,1])
+      # elif self.approach == 'Anterior':
+      #     logging.debug("Anterior")
+      #     camera.SetPosition(0,600,0)
+      #     camera.SetViewUp([0,0,1])
+      # elif self.approach == 'Left':
+      #     logging.debug("Left")
+      #     camera.SetPosition(-600,0,0)
+      #     camera.SetViewUp([0,0,1])
+      # elif self.approach == 'Right':
+      #     logging.debug("Right")
+      #     camera.SetPosition(600,0,0)
+      #     camera.SetViewUp([0,0,1])
       camera.ResetClippingRange()
       #pNode = self.parameterNode()
       #pNode.SetParameter('currentStep', self.stepid)
@@ -287,7 +287,7 @@ class LandmarksStep( PedicleScrewSimulatorStep ):
       self.fiducialNodeObservations.append(fiducialNode.AddObserver(slicer.vtkMRMLMarkupsNode.PointModifiedEvent, self.addFiducialToTable))
       self.fiducialNodeObservations.append(fiducialNode.AddObserver(slicer.vtkMRMLMarkupsNode.PointPositionUndefinedEvent, self.addFiducialToTable))
 
-      if comingFrom.id() == 'DefineROI':
+      if comingFrom.id() == 'Segmentation':
           self.updateTable()
 
     def getLandmarksNode(self):
@@ -295,7 +295,7 @@ class LandmarksStep( PedicleScrewSimulatorStep ):
 
     def onExit(self, goingTo, transitionType):
 
-      if goingTo.id() == 'Measurements' or goingTo.id() == 'DefineROI':
+      if goingTo.id() == 'Measurements' or goingTo.id() == 'Segmentation':
           self.stop()
           fiducialNode = self.fiducialNode()
           for observation in self.fiducialNodeObservations:
@@ -307,7 +307,7 @@ class LandmarksStep( PedicleScrewSimulatorStep ):
       #if goingTo.id() == 'Threshold':
           #slicer.mrmlScene.RemoveNode(self.__outModel)
 
-      if goingTo.id() != 'DefineROI' and goingTo.id() != 'Measurements':
+      if goingTo.id() != 'Segmentation' and goingTo.id() != 'Measurements':
           return
 
       super(LandmarksStep, self).onExit(goingTo, transitionType)

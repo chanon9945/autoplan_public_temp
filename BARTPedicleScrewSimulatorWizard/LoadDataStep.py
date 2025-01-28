@@ -1,4 +1,4 @@
-from __main__ import qt, ctk, vtk, slicer
+import qt, ctk, vtk, slicer
 
 from .PedicleScrewSimulatorStep import *
 from .Helper import *
@@ -140,13 +140,13 @@ class LoadDataStep(PedicleScrewSimulatorStep):
     #called when exiting step
     def onExit(self, goingTo, transitionType):
 
-      #check to make sure going to correct step
-      if goingTo.id() == 'DefineROI':
-        self.doStepProcessing();
-
-      if goingTo.id() != 'DefineROI':
-        return
-
+      # #check to make sure going to correct step
+      # if goingTo.id() == 'DefineROI':
+      #   self.doStepProcessing()
+      #
+      # if goingTo.id() != 'DefineROI':
+      #   return
+      self.doStepProcessing()
       super(LoadDataStep, self).onExit(goingTo, transitionType)
 
     def doStepProcessing(self):

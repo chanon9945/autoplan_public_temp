@@ -5,6 +5,7 @@ set(MODULE_NAME BART_Planning)
 set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py
   PedicleScrewSimulatorWizard/__init__.py
+  PedicleScrewSimulatorWizard/IntermediateStep.py
   PedicleScrewSimulatorWizard/DefineROIStep.py
   PedicleScrewSimulatorWizard/EndStep.py
   PedicleScrewSimulatorWizard/GradeStep.py
@@ -14,6 +15,7 @@ set(MODULE_PYTHON_SCRIPTS
   PedicleScrewSimulatorWizard/MeasurementsStep.py
   PedicleScrewSimulatorWizard/PedicleScrewSimulatorStep.py
   PedicleScrewSimulatorWizard/ScrewStep.py
+)
   )
 
 set(MODULE_PYTHON_RESOURCES

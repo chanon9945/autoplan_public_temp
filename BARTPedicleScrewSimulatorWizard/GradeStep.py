@@ -1,4 +1,4 @@
-from __main__ import qt, ctk, vtk, slicer
+import qt, ctk, vtk, slicer
 
 from .PedicleScrewSimulatorStep import *
 from .Helper import *
@@ -8,7 +8,7 @@ class GradeStep(PedicleScrewSimulatorStep):
 
     def __init__( self, stepid ):
       self.initialize( stepid )
-      self.setName( 'Grade' )
+      self.setName( '6. Grade' )
       self.setDescription( 'Grading Step' )
       self.fiduciallist = []
       self.__corticalMin = 375
@@ -50,6 +50,7 @@ class GradeStep(PedicleScrewSimulatorStep):
       '''
       # Paint Screw Button
       self.__selectScrewButton = qt.QPushButton("Grade Screws")
+      self.__selectScrewButton.setStyleSheet("background-color: green;")
       self.__layout.addWidget(self.__selectScrewButton)
       self.__selectScrewButton.connect('clicked(bool)', self.gradeScrews)
       '''
@@ -61,7 +62,7 @@ class GradeStep(PedicleScrewSimulatorStep):
       self.__layout.addRow("Volume Opacity", self.transformSlider3)
       '''
       self.fiducial = self.fiducialNode()
-      self.fidNumber = self.fiducial.GetNumberOfFiducials()
+      self.fidNumber = self.fiducial.GetNumberOfControlPoints()
 
       # Screw Table
       horizontalHeaders = ["Screw At","Screw\n Size","% Screw in\n Soft Tissue\n (<130HU)","% Screw in\n LD Bone\n (130-250HU)","% Screw in\n HD Bone\n (>250HU)" ]
@@ -76,7 +77,14 @@ class GradeStep(PedicleScrewSimulatorStep):
 
       self.screwTable.setHorizontalHeaderLabels(horizontalHeaders)
 
+      # Add a button to save the 3D model as a single object
+      self.saveModelButton = qt.QPushButton("Save 3D Model")
+      self.saveModelButton.setStyleSheet("background-color: blue;")
+      self.saveModelButton.toolTip = "Save the 3D view model into a single object."
+      self.__layout.addWidget(self.saveModelButton)
 
+      # Connect the button to the save function
+      self.saveModelButton.clicked.connect(self.save3DModel)
 
       self.updateWidgetFromParameters(self.parameterNode())
       qt.QTimer.singleShot(0, self.killButton)
@@ -87,13 +95,72 @@ class GradeStep(PedicleScrewSimulatorStep):
     #    #logging.debug(value)
     #    self.vrUpdate(value)
 
+    def save3DModel(self):
+        # Get all visible models in the 3D view
+        scene = slicer.mrmlScene
+        models = []
+        for i in range(scene.GetNumberOfNodesByClass("vtkMRMLModelNode")):
+            modelNode = scene.GetNthNodeByClass(i, "vtkMRMLModelNode")
+            transformNode = modelNode.GetParentTransformNode()
+            if transformNode:
+                modelNode.HardenTransform()
+            if modelNode.GetDisplayVisibility():
+                models.append(modelNode)
+
+        if not models:
+            qt.QMessageBox.warning(None, "No Models Found", "No visible models found in the 3D view.")
+            return
+
+        # Get segmentation data
+        segmentationNodes = []
+        for i in range(scene.GetNumberOfNodesByClass("vtkMRMLSegmentationNode")):
+            segmentationNode = scene.GetNthNodeByClass(i, "vtkMRMLSegmentationNode")
+            if segmentationNode.GetDisplayVisibility():
+                segmentationNodes.append(segmentationNode)
+
+        if not segmentationNodes:
+            qt.QMessageBox.warning(None, "No Segmentations Found", "No visible segmentations found in the 3D view.")
+
+        # Merge models and segmentations into a single object
+        appendFilter = vtk.vtkAppendPolyData()
+        for model in models:
+            polyData = model.GetPolyData()
+            if polyData:
+                appendFilter.AddInputData(polyData)
+
+        for segNode in segmentationNodes:
+            vtkSeg = segNode.GetSegmentation()
+            for i in range(vtkSeg.GetNumberOfSegments()):
+                segmentId = vtkSeg.GetNthSegmentID(i)
+                segmentPolyData = vtk.vtkPolyData()
+                # This call is usually on the MRML node:
+                segNode.GetClosedSurfaceRepresentation(segmentId, segmentPolyData)
+                appendFilter.AddInputData(segmentPolyData)
+
+        appendFilter.Update()
+
+        # Create a new model node for the merged data
+        mergedModel = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "MergedModel")
+        mergedModel.SetAndObservePolyData(appendFilter.GetOutput())
+
+        filePath = qt.QFileDialog.getSaveFileName(None, "Save 3D Model", "", "STL Files (*.stl);;OBJ Files (*.obj);;All Files (*)")
+        if filePath:
+            slicer.util.saveNode(mergedModel, filePath)
+
+        # Set display properties
+        displayNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelDisplayNode")
+        mergedModel.SetAndObserveDisplayNodeID(displayNode.GetID())
+        displayNode.VisibilityOn()
+
+        qt.QMessageBox.information(None, "Model Saved", "The 3D model and segmentations have been merged and saved as 'MergedModel'.")
+
     def onTableCellClicked(self):
       if self.screwTable.currentColumn() == 0:
           logging.debug(self.screwTable.currentRow())
           self.currentFid = self.screwTable.currentRow()
           position = [0,0,0]
           self.fiducial = self.fiducialNode()
-          self.fiducial.GetNthFiducialPosition(self.currentFid,position)
+          self.fiducial.GetNthControlPointPosition(self.currentFid,position)
           self.cameraFocus(position)
           self.sliceChange()
           #self.updateChart(self.screwList[self.currentFid])
@@ -132,8 +199,6 @@ class GradeStep(PedicleScrewSimulatorStep):
           self.screwTable.setItem(i, 1, qtscrewLen)
           #self.screwTable.setItem(i, 2, qtscrewDia)
 
-
-
     def validate( self, desiredBranchId ):
       '''
       '''
@@ -151,15 +216,16 @@ class GradeStep(PedicleScrewSimulatorStep):
 
       self.fiduciallist = []
       self.fidNode = self.fiducialNode()
-      for x in range (0,self.fidNode.GetNumberOfFiducials()):
-        label = self.fidNode.GetNthFiducialLabel(x)
+      for x in range (0,self.fidNode.GetNumberOfControlPoints()):
+        label = self.fidNode.GetNthControlPointLabel(x)
         level = slicer.modules.BART_PlanningWidget.landmarksStep.table2.cellWidget(x,1).currentText
         side = slicer.modules.BART_PlanningWidget.landmarksStep.table2.cellWidget(x,2).currentText
         self.fiduciallist.append(label + " / " + level + " / " + side)
 
       logging.debug(self.fiduciallist)
 
-      self.vrUpdate(0.03)
+      # self.vrUpdate(0.03)
+      self.updateTable()
 
       qt.QTimer.singleShot(0, self.killButton)
 
@@ -170,7 +236,7 @@ class GradeStep(PedicleScrewSimulatorStep):
       if goingTo.id() == 'Screw':
           self.clearGrade()
 
-      self.vrUpdate(1.0)
+      # self.vrUpdate(1.0)
 
       super(GradeStep, self).onExit(goingTo, transitionType)
 
@@ -188,7 +254,7 @@ class GradeStep(PedicleScrewSimulatorStep):
 
     def sliceChange(self):
         coords = [0,0,0]
-        self.fiducial.GetNthFiducialPosition(self.currentFid,coords)
+        self.fiducial.GetNthControlPointPosition(self.currentFid,coords)
 
         lm = slicer.app.layoutManager()
         redWidget = lm.sliceWidget('Red')
@@ -213,7 +279,7 @@ class GradeStep(PedicleScrewSimulatorStep):
 
         pNode = self.parameterNode()
 
-        self.__inputScalarVol = pNode.GetNodeReference('croppedBaselineVolume')
+        self.__inputScalarVol = pNode.GetNodeReference('baselineVolume')
         for screwIndex in range(0, len(self.fiduciallist)):
             fidName = self.fiduciallist[screwIndex]
             logging.debug(fidName)
@@ -526,10 +592,10 @@ class GradeStep(PedicleScrewSimulatorStep):
 
         #For each fiducial, restore original screw model and remove graded screw model
         fiducial = self.fiducialNode()
-        fidCount = fiducial.GetNumberOfFiducials()
+        fidCount = fiducial.GetNumberOfControlPoints()
         for i in range(fidCount):
-          fiducial.SetNthFiducialVisibility(i, False)
-          fidName = fiducial.GetNthFiducialLabel(i)
+          fiducial.SetNthControlPointVisibility(i, False)
+          fidName = fiducial.GetNthControlPointLabel(i)
           screwModel = slicer.mrmlScene.GetFirstNodeByName('Screw at point %s' % fidName)
           if screwModel != None:
               modelDisplay = screwModel.GetDisplayNode()
@@ -544,13 +610,13 @@ class GradeStep(PedicleScrewSimulatorStep):
           if headModel != None:
               slicer.mrmlScene.RemoveNode(headModel)
 
-    def vrUpdate(self, opacity):
-      pNode = self.parameterNode()
-      vrDisplayNode = pNode.GetNodeReference('vrDisplayNode')
-      vrOpacityMap = vrDisplayNode.GetVolumePropertyNode().GetVolumeProperty().GetScalarOpacity()
-      vrOpacityMap.RemoveAllPoints()
-      vrOpacityMap.AddPoint(0,0)
-      vrOpacityMap.AddPoint(self.__cancellousMin-1,0)
-      vrOpacityMap.AddPoint(self.__cancellousMin,opacity)
-      vrOpacityMap.AddPoint(self.__corticalMax,opacity)
-      vrOpacityMap.AddPoint(self.__corticalMax+1,0)
+    # def vrUpdate(self, opacity):
+    #   pNode = self.parameterNode()
+    #   vrDisplayNode = pNode.GetNodeReference('vrDisplayNode')
+    #   vrOpacityMap = vrDisplayNode.GetVolumePropertyNode().GetVolumeProperty().GetScalarOpacity()
+    #   vrOpacityMap.RemoveAllPoints()
+    #   vrOpacityMap.AddPoint(0,0)
+    #   vrOpacityMap.AddPoint(self.__cancellousMin-1,0)
+    #   vrOpacityMap.AddPoint(self.__cancellousMin,opacity)
+    #   vrOpacityMap.AddPoint(self.__corticalMax,opacity)
+    #   vrOpacityMap.AddPoint(self.__corticalMax+1,0)

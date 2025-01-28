@@ -16,7 +16,7 @@ from slicer.parameterNodeWrapper import (
     WithinRange,
 )
 
-import PedicleScrewSimulatorWizard
+import BARTPedicleScrewSimulatorWizard
 
 #
 # BART_Planning
@@ -61,22 +61,25 @@ class BART_PlanningWidget(ScriptedLoadableModuleWidget):
 
         self.workflow = ctk.ctkWorkflow()
 
-        workflowWidget = ctk.ctkWorkflowStackedWidget()
-        workflowWidget.setWorkflow(self.workflow)
+        self.workflowWidget = ctk.ctkWorkflowStackedWidget()
+        self.workflowWidget.setWorkflow(self.workflow)
+        self.layout.addWidget(self.workflowWidget)
 
         # create all wizard steps
-        self.loadDataStep = PedicleScrewSimulatorWizard.LoadDataStep('LoadData')
-        self.defineROIStep = PedicleScrewSimulatorWizard.DefineROIStep('DefineROI', showSidesSelector=False)
-        self.measurementsStep = PedicleScrewSimulatorWizard.MeasurementsStep('Measurements')
-        self.landmarksStep = PedicleScrewSimulatorWizard.LandmarksStep('Landmarks')
-        self.screwStep = PedicleScrewSimulatorWizard.ScrewStep('Screw')
-        self.gradeStep = PedicleScrewSimulatorWizard.GradeStep('Grade')
-        self.endStep = PedicleScrewSimulatorWizard.EndStep('Final')
+        self.loadDataStep = BARTPedicleScrewSimulatorWizard.LoadDataStep('LoadData')
+        self.segmentationStep = BARTPedicleScrewSimulatorWizard.SegmentationStep('Segmentation')
+        self.defineROIStep = BARTPedicleScrewSimulatorWizard.DefineROIStep('DefineROI', showSidesSelector=False)
+        self.measurementsStep = BARTPedicleScrewSimulatorWizard.MeasurementsStep('Measurements')
+        self.landmarksStep = BARTPedicleScrewSimulatorWizard.LandmarksStep('Landmarks')
+        self.screwStep = BARTPedicleScrewSimulatorWizard.ScrewStep('Screw')
+        self.gradeStep = BARTPedicleScrewSimulatorWizard.GradeStep('Grade')
+        self.endStep = BARTPedicleScrewSimulatorWizard.EndStep('Final')
 
         # add the wizard steps to an array for convenience
         allSteps = []
 
         allSteps.append(self.loadDataStep)
+        allSteps.append(self.segmentationStep)  # Add the new segmentation step
         allSteps.append(self.defineROIStep)
         allSteps.append(self.landmarksStep)
         allSteps.append(self.measurementsStep)
@@ -86,10 +89,18 @@ class BART_PlanningWidget(ScriptedLoadableModuleWidget):
 
         # Add transition
         # Check if volume is loaded
-        self.workflow.addTransition(self.loadDataStep, self.defineROIStep)
+        # Transition from LoadData to segmentationStep
+        self.workflow.addTransition(self.loadDataStep, self.segmentationStep)
 
-        self.workflow.addTransition(self.defineROIStep, self.landmarksStep, 'pass', ctk.ctkWorkflow.Bidirectional)
-        self.workflow.addTransition(self.defineROIStep, self.loadDataStep, 'fail', ctk.ctkWorkflow.Bidirectional)
+        # Transition from segmentationStep to DefineROI
+        self.workflow.addTransition(self.segmentationStep, self.landmarksStep)
+
+        # # Remaining transitions
+        # self.workflow.addTransition(self.defineROIStep, self.landmarksStep, 'pass', ctk.ctkWorkflow.Bidirectional)
+        # self.workflow.addTransition(self.defineROIStep, self.loadDataStep, 'fail', ctk.ctkWorkflow.Bidirectional)
+        #
+        # # Transition from SegmentationStep to DefineROI
+        # self.workflow.addTransition(self.segmentationStep, self.defineROIStep)
 
         self.workflow.addTransition(self.landmarksStep, self.measurementsStep, 'pass', ctk.ctkWorkflow.Bidirectional)
         self.workflow.addTransition(self.landmarksStep, self.measurementsStep, 'fail', ctk.ctkWorkflow.Bidirectional)
@@ -127,25 +138,27 @@ class BART_PlanningWidget(ScriptedLoadableModuleWidget):
             logging.debug('Restoring workflow step to ' + currentStep)
             if currentStep == 'LoadData':
                 self.workflow.setInitialStep(self.loadDataStep)
-            if currentStep == 'DefineROI':
+            elif currentStep == 'Segmentation':
+                self.workflow.setInitialStep(self.segmentationStep)
+            elif currentStep == 'DefineROI':
                 self.workflow.setInitialStep(self.defineROIStep)
-            if currentStep == 'Measurements':
+            elif currentStep == 'Measurements':
                 self.workflow.setInitialStep(self.measurementsStep)
-            if currentStep == 'Landmarks':
+            elif currentStep == 'Landmarks':
                 self.workflow.setInitialStep(self.landmarksStep)
-            if currentStep == 'Screw':
+            elif currentStep == 'Screw':
                 self.workflow.setInitialStep(self.screwStep)
-            if currentStep == 'Grade':
+            elif currentStep == 'Grade':
                 self.workflow.setInitialStep(self.gradeStep)
-            if currentStep == 'Final':
+            elif currentStep == 'Final':
                 self.workflow.setInitialStep(self.endStep)
         else:
             logging.debug('currentStep in parameter node is empty')
 
         # start the workflow and show the widget
         self.workflow.start()
-        workflowWidget.visible = True
-        self.layout.addWidget(workflowWidget)
+        self.workflowWidget.visible = True
+        self.layout.addWidget(self.workflowWidget)
 
         # compress the layout
         # self.layout.addStretch(1)
@@ -156,9 +169,10 @@ class BART_PlanningWidget(ScriptedLoadableModuleWidget):
     def onReload(self):
         logging.debug("Reloading BART_Planning")
 
-        packageName = 'PedicleScrewSimulatorWizard'
+        packageName = 'BARTPedicleScrewSimulatorWizard'
         submoduleNames = ['PedicleScrewSimulatorStep',
                           'DefineROIStep',
+                          'SegmentationStep',
                           'EndStep',
                           'GradeStep',
                           'Helper',
