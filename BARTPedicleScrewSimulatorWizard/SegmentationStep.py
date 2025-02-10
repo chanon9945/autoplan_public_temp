@@ -9,7 +9,7 @@ class SegmentationStep(PedicleScrewSimulatorStep):
     def __init__(self, stepid):
         self.initialize(stepid)
         self.setName('2. Segmentation Step')
-        self.setDescription('This step transitions from data loading to ROI definition.')
+        self.setDescription('Spine segmentation step')
         self.__parent = super(SegmentationStep, self)
 
     def killButton(self):
@@ -134,6 +134,20 @@ class SegmentationStep(PedicleScrewSimulatorStep):
             )
             # self.retainSpecificSegments(outputSegmentationNode,["vertebra","sacrum"])
             self.retainSpecificSegments(outputSegmentationNode,["L1 vertebra", "L2 vertebra", "L3 vertebra", "L4 vertebra", "L5 vertebra"])
+            # Increase color contrast for the retained segments
+            segmentation = outputSegmentationNode.GetSegmentation()
+            Colors = {
+                "L1 vertebra": (0.56, 0.93, 0.56),  # Red
+                "L2 vertebra": (0.75, 0.40, 0.34),  # Green
+                "L3 vertebra": (0.86, 0.96, 0.08),  # Blue
+                "L4 vertebra": (0.3, 0.25, 0.0),  # Yellow
+                "L5 vertebra": (1.0, 0.98, 0.86),  # Magenta
+            }
+
+            for segmentName, color in Colors.items():
+                segmentID = segmentation.GetSegmentIdBySegmentName(segmentName)
+                if segmentID:
+                    segmentation.GetSegment(segmentID).SetColor(color)
             # Set the segmentation node for the 3D visibility button
             self.segmentationShow3DButton.setSegmentationNode(outputSegmentationNode)
             # maskVolumeNode = self.convertSegmentationToMask(outputSegmentationNode, inputVolumeNode)
