@@ -246,7 +246,7 @@ class LandmarksStep( PedicleScrewSimulatorStep ):
       lm = slicer.app.layoutManager()
       if lm == None:
         return
-      lm.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
+      lm.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpRedSliceView)
 
       pNode = self.parameterNode()
       logging.debug(pNode)
