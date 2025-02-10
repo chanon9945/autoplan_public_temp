@@ -28,10 +28,23 @@ class ScrewStep(PedicleScrewSimulatorStep):
       self.approach = None
 
       self.screwList = []
+      self.screwColors = [
+          (0.74, 0.25, 0.11),
+          (0.11, 0.32, 0.64),
+          (0.89, 0.70, 0.02),
+          (0.47, 0.67, 0.33),
+          (0.56, 0.39, 0.64),
+          (0.95, 0.61, 0.37),
+          (0.53, 0.00, 0.00),
+          (0.00, 0.80, 0.95),
+          (0.35, 0.34, 0.30),
+          (0.47, 0.31, 0.22)
+
+      ]
+      self.screwCount = 0
       self.currentFidIndex = 0
       self.currentFidLabel = None
-
-      self.fidNode = slicer.vtkMRMLMarkupsFiducialNode()
+      self.screwSliceDisplays = {}
 
       self.valueTemp1 = 0
       self.valueTemp2 = 0
@@ -50,7 +63,6 @@ class ScrewStep(PedicleScrewSimulatorStep):
 
 
     def killButton(self):
-      # hide useless button
       bl = slicer.util.findChildren(text='Final')
       if len(bl):
         bl[0].hide()
@@ -63,8 +75,6 @@ class ScrewStep(PedicleScrewSimulatorStep):
       self.fiducial.toolTip = "Select an insertion site."
       self.fiducial.addItems(self.fiduciallist)
       self.connect(self.fiducial, PythonQt.QtCore.SIGNAL('activated(QString)'), self.fiducial_chosen)
-
-      #self.screwGridLayout.addWidget(self.fiducial,0,0)
 
       self.__layout.addRow("Insertion Site:", self.fiducial)
       self.__fiducial = ''
@@ -106,14 +116,12 @@ class ScrewStep(PedicleScrewSimulatorStep):
       self.__loadScrewButton = qt.QPushButton("Load Screw")
       self.__loadScrewButton.enabled = False
       self.__loadScrewButton.setStyleSheet("background-color: green;")
-      #self.__layout.addWidget(self.__loadScrewButton)
       self.__loadScrewButton.connect('clicked(bool)', self.loadScrew)
 
       # Delete Screw Button
       self.__delScrewButton = qt.QPushButton("Delete Screw")
       self.__delScrewButton.enabled = True
       self.__delScrewButton.setStyleSheet("background-color: red;")
-      #self.__layout.addWidget(self.__delScrewButton)
       self.__delScrewButton.connect('clicked(bool)', self.delScrew)
 
       self.QHBox3 = qt.QHBoxLayout()
@@ -148,7 +156,6 @@ class ScrewStep(PedicleScrewSimulatorStep):
       self.transformSlider1.connect('valueChanged(double)', self.transformSlider1ValueChanged)
       self.transformSlider1.connect('valueChanged(double)', self.b.setValue)
       self.transformSlider1.setMinimumHeight(120)
-      #self.__layout.addRow("Rotate IS", self.transformSlider1)
       self.transformGrid.addWidget(self.transformSlider1, 1,1)
 
       self.b.connect('valueChanged(double)', self.transformSlider1.setValue)
@@ -159,7 +166,6 @@ class ScrewStep(PedicleScrewSimulatorStep):
       self.transformSlider2.maximum = 45
       self.transformSlider2.connect('valueChanged(double)', self.transformSlider2ValueChanged)
       self.transformSlider2.setMinimumHeight(120)
-      #self.__layout.addRow("Rotate LR", self.transformSlider2)
       self.transformGrid.addWidget(self.transformSlider2, 1,2)
       self.__layout.addRow(self.transformGrid)
 
@@ -167,21 +173,18 @@ class ScrewStep(PedicleScrewSimulatorStep):
       self.insertScrewButton = qt.QPushButton("Insert Screw")
       self.insertScrewButton.enabled = True
       self.insertScrewButton.setStyleSheet("background-color: green;")
-      #self.__layout.addWidget(self.__loadScrewButton)
       self.insertScrewButton.connect('clicked(bool)', self.insertScrew)
 
       # Backout Screw Button
       self.backoutScrewButton = qt.QPushButton("Backout Screw")
       self.backoutScrewButton.enabled = False
       self.backoutScrewButton.setStyleSheet("background-color: red;")
-      #self.__layout.addWidget(self.__delScrewButton)
       self.backoutScrewButton.connect('clicked(bool)', self.backoutScrew)
 
       # Reset Screw Button
       self.resetScrewButton = qt.QPushButton("Reset Screw")
       self.resetScrewButton.enabled = True
       self.resetScrewButton.setStyleSheet("background-color: blue;")
-      #self.__layout.addWidget(self.__delScrewButton)
       self.resetScrewButton.connect('clicked(bool)', self.resetScrew)
 
       self.QHBox4 = qt.QHBoxLayout()
@@ -260,28 +263,9 @@ class ScrewStep(PedicleScrewSimulatorStep):
       logging.debug("Fid level side: {0}".format(self.fidLevelSide))
 
     def sliceChange(self):
-        pos = [0,0,0]
-        if self.fidNode != None:
-          self.fidNode.GetNthControlPointPosition(self.currentFidIndex,pos)
-
-          lm = slicer.app.layoutManager()
-          redWidget = lm.sliceWidget('Red')
-          redController = redWidget.sliceController()
-
-          yellowWidget = lm.sliceWidget('Yellow')
-          yellowController = yellowWidget.sliceController()
-
-          greenWidget = lm.sliceWidget('Green')
-          greenController = greenWidget.sliceController()
-
-          yellowController.setSliceOffsetValue(pos[0])
-          greenController.setSliceOffsetValue(pos[1])
-          redController.setSliceOffsetValue(pos[2])
-          logging.debug("Position: {0}".format(pos))
-          self.fidNode.UpdateScene(slicer.mrmlScene)
-
-        else:
+        if not self.fidNode or self.currentFidIndex < 0:
             return
+        slicer.modules.markups.logic().JumpSlicesToLocation(self.coords[0], self.coords[1], self.coords[2], True)
 
     def fidChanged(self, fid):
 
@@ -326,7 +310,9 @@ class ScrewStep(PedicleScrewSimulatorStep):
               self.currentFidIndex, self.currentFidLabel, self.coords))
             self.updateMeasurements()
             self.combo_chosen()
-
+            self.zoomIn()
+            self.sliceChange()
+            self.updateScrew2DVisibility()
 
     def length_chosen(self, text):
         if text != "Select a length (mm)":
@@ -351,8 +337,6 @@ class ScrewStep(PedicleScrewSimulatorStep):
             self.screwPath = self.screwPath.replace("\\", "/")
             logging.debug("Screw file path: {0}".format(self.screwPath))
             self.__loadScrewButton.enabled = True
-            # self.screwName = 'scaled_' + text
-            # self.transformSlider3.maximum = int(self.__diameter)
 
     def loadScrew(self):
         logging.debug("load screw button")
@@ -385,19 +369,28 @@ class ScrewStep(PedicleScrewSimulatorStep):
         self.addLineAlignedWithScrew(screwModel)
 
         modelDisplay = screwModel.GetDisplayNode()
-        modelDisplay.SetColor(0.12,0.73,0.91)
-        modelDisplay.SetDiffuse(0.90)
-        modelDisplay.SetAmbient(0.10)
-        modelDisplay.SetSpecular(0.20)
-        modelDisplay.SetPower(10.0)
+        chosenColor = self.screwColors[self.screwCount % len(self.screwColors)]
+        modelDisplay.SetColor(*chosenColor)
+        modelDisplay.SetDiffuse(1.0)
+        modelDisplay.SetAmbient(0.3)
+        modelDisplay.SetSpecular(0.6)
+        modelDisplay.SetPower(20.0)
+        modelDisplay.SetOpacity(1.0)
         modelDisplay.SetVisibility2D(True)
+        modelDisplay.SetSliceDisplayMode(2)
+        modelDisplay.SetSliceIntersectionOpacity(0.2)
+
         screwModel.SetAndObserveDisplayNodeID(modelDisplay.GetID())
+
+        sliceDisplays = self.setupPerSliceDisplayNodes(screwModel)
+        self.screwSliceDisplays[screwModel.GetName()] = sliceDisplays
 
         screwDescrip[0] = self.currentFidLabel
         screwDescrip[1] = self.__length
         screwDescrip[2] = self.__diameter
 
         self.screwList.append(screwDescrip)
+        self.screwCount += 1
 
         self.insertScrewButton.enabled = True
         self.backoutScrewButton.enabled = False
@@ -405,9 +398,9 @@ class ScrewStep(PedicleScrewSimulatorStep):
         self.transformSlider1.enabled = True
         self.transformSlider2.enabled = True
 
-    def delScrew(self):
-        #fidName = self.inputFiducialsNodeSelector.currentNode().GetName()
+        self.resetScrew()
 
+    def delScrew(self):
         transformFid = slicer.mrmlScene.GetFirstNodeByName('Transform-%s' % self.currentFidLabel)
         screwModel = slicer.mrmlScene.GetFirstNodeByName('Screw at point %s' % self.currentFidLabel)
 
@@ -444,14 +437,6 @@ class ScrewStep(PedicleScrewSimulatorStep):
           return
 
     def addLineAlignedWithScrew(self, screwNode):
-        """
-        Adds a line that aligns with the screw node.
-
-        Parameters:
-            screwNode: vtkMRMLModelNode
-                The screw model node loaded in the scene.
-        """
-
         # Remove old line node if present
         existingLineNode = slicer.mrmlScene.GetFirstNodeByName("Screw Alignment Line")
         if existingLineNode:
@@ -489,7 +474,6 @@ class ScrewStep(PedicleScrewSimulatorStep):
         lineDisplayNode.SetColor(1, 0, 0)  # red
         lineDisplayNode.SetLineWidth(3)
         lineDisplayNode.SetVisibility2D(True)
-        # Key step: show full line in slice
         lineDisplayNode.SetSliceDisplayModeToProjection()
 
         # Link display node to model node
@@ -566,24 +550,137 @@ class ScrewStep(PedicleScrewSimulatorStep):
         self.screwList[self.currentFidIndex] = temp
         logging.debug("Screw list: {0}".format(self.screwList))
 
-    def delayDisplay(self,action, msec=1000):
-      """This utility method displays a small dialog and waits.
-      This does two things: 1) it lets the event loop catch up
-      to the state of the test so that rendering and widget updates
-      have all taken place before the test continues and 2) it
-      shows the user/developer/tester the state of the test
-      so that we'll know when it breaks.
-      """
-      #logging.info(message)
-      #self.info = qt.QDialog()
-      #self.infoLayout = qt.QVBoxLayout()
-      #self.info.setLayout(self.infoLayout)
-      #self.label = qt.QLabel(message,self.info)
-      #self.infoLayout.addWidget(self.label)
-      #qt.QTimer.singleShot(msec, action)
-      #self.info.exec_()
-      pass
+    def zoomIn(self, factor=0.2):
+        slicer.app.applicationLogic().PropagateVolumeSelection(True)
+        sliceViewNames = ["Red", "Yellow", "Green"]
 
+        for viewName in sliceViewNames:
+            sliceWidget = slicer.app.layoutManager().sliceWidget(viewName)
+            if not sliceWidget:
+                continue
+
+            sliceLogic = sliceWidget.sliceLogic()
+            sliceNode = sliceLogic.GetSliceNode()
+
+            if not sliceNode:
+                continue
+
+            fov = sliceNode.GetFieldOfView()
+            newFov = [fov[0] * factor, fov[1] * factor, fov[2]]
+
+            sliceNode.SetFieldOfView(newFov[0], newFov[1], newFov[2])
+            sliceNode.UpdateMatrices()
+
+    def setupPerSliceDisplayNodes(self, modelNode):
+        """
+        Create three extra display nodes on `modelNode`, each limited to a single slice:
+          - RedDisplay  => Red slice
+          - YellowDisplay => Yellow slice
+          - GreenDisplay  => Green slice
+        Returns a dict of { "Red": displayNode, "Yellow": displayNode, "Green": displayNode }.
+        """
+
+        # Safety check: must have an existing display node we can copy from
+        originalDisplayNode = modelNode.GetDisplayNode()
+        if not originalDisplayNode:
+            logging.warning(f"Model node {modelNode.GetName()} has no display node to copy.")
+            return {}
+
+        # Helper to remove all view IDs from a display node
+        def removeAllViewNodeIDs(displayNode):
+            for vid in list(displayNode.GetViewNodeIDs()):
+                displayNode.RemoveViewNodeID(vid)
+
+        # Get slice nodes
+        lm = slicer.app.layoutManager()
+        redSliceNode = lm.sliceWidget("Red").sliceLogic().GetSliceNode()
+        yellowSliceNode = lm.sliceWidget("Yellow").sliceLogic().GetSliceNode()
+        greenSliceNode = lm.sliceWidget("Green").sliceLogic().GetSliceNode()
+
+        # Create a dictionary to store the new display nodes
+        perSliceDisplays = {}
+
+        # --- Red slice ---
+        redDisplay = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelDisplayNode", modelNode.GetName() + "-RedDisplay")
+        # Copy color/opacity/etc. from the original
+        redDisplay.CopyContent(originalDisplayNode)
+        # Remove all view node IDs so we can add just the Red slice
+        removeAllViewNodeIDs(redDisplay)
+        redDisplay.AddViewNodeID(redSliceNode.GetID())
+        # Attach to the model
+        modelNode.AddAndObserveDisplayNodeID(redDisplay.GetID())
+        perSliceDisplays["Red"] = redDisplay
+
+        # --- Yellow slice ---
+        yellowDisplay = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelDisplayNode",
+                                                           modelNode.GetName() + "-YellowDisplay")
+        yellowDisplay.CopyContent(originalDisplayNode)
+        removeAllViewNodeIDs(yellowDisplay)
+        yellowDisplay.AddViewNodeID(yellowSliceNode.GetID())
+        modelNode.AddAndObserveDisplayNodeID(yellowDisplay.GetID())
+        perSliceDisplays["Yellow"] = yellowDisplay
+
+        # --- Green slice ---
+        greenDisplay = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelDisplayNode",
+                                                          modelNode.GetName() + "-GreenDisplay")
+        greenDisplay.CopyContent(originalDisplayNode)
+        removeAllViewNodeIDs(greenDisplay)
+        greenDisplay.AddViewNodeID(greenSliceNode.GetID())
+        modelNode.AddAndObserveDisplayNodeID(greenDisplay.GetID())
+        perSliceDisplays["Green"] = greenDisplay
+
+        # Hide the original display node in 2D (optional, if you want *only* these slice-specific displays)
+        originalDisplayNode.SetVisibility2D(False)
+
+        return perSliceDisplays
+
+    def updateScrew2DVisibility(self):
+        # Example fiducial label: "Fid1 / L4 / Left"
+        parts = self.currentFidLabel.split(" / ")
+        if len(parts) < 3:
+            logging.warning("Current fiducial label does not have 'Name / Level / Side' format.")
+            return
+
+        selected_level = parts[1].strip()
+        selected_side = parts[2].strip()
+
+        # For each screw model node
+        allModels = slicer.util.getNodesByClass("vtkMRMLModelNode")
+        for modelNode in allModels:
+            name = modelNode.GetName()
+            # Only operate on screws
+            if not name.startswith("Screw at point"):
+                continue
+
+            # We expect name format like "Screw at point Fid1 / L4 / Left"
+            screwParts = name.replace("Screw at point", "").strip().split(" / ")
+            if len(screwParts) < 3:
+                continue
+            screw_level = screwParts[1].strip()
+            screw_side = screwParts[2].strip()
+
+            # Retrieve the per-slice display nodes
+            # (You must have saved these somewhere previously—e.g. in a dictionary.)
+            sliceDisplays = self.screwSliceDisplays.get(modelNode.GetName(), None)
+            if not sliceDisplays:
+                # If you never created them or can't find them, skip
+                logging.debug(f"No per-slice displays found for {modelNode.GetName()}")
+                continue
+
+            # Toggle Red slice
+            redDisp = sliceDisplays["Red"]
+            redVisible = (screw_level == selected_level)
+            redDisp.SetVisibility2D(redVisible)
+
+            # Toggle Yellow slice
+            yellowDisp = sliceDisplays["Yellow"]
+            yellowVisible = (screw_side == selected_side)
+            yellowDisp.SetVisibility2D(yellowVisible)
+
+            # Toggle Green slice
+            greenDisp = sliceDisplays["Green"]
+            greenVisible = True  # Always visible
+            greenDisp.SetVisibility2D(greenVisible)
 
     def driveScrew(self):
         sanitized_length = self.__length.replace('.', '')
@@ -648,8 +745,8 @@ class ScrewStep(PedicleScrewSimulatorStep):
         if self.screwInsert < int(sanitized_diameter):
 
             value = self.screwInsert
-            # Calculate the reverse rotation angle (convert degrees to radians, negative for reverse)
-            angle3 = math.radians(-72)  # Adjust rotation angle as needed
+            # Calculate the reverse rotation angle
+            angle3 = math.radians(-72)
 
             # Create a 4x4 rotation matrix
             matrix3 = vtk.vtkMatrix4x4()
@@ -669,7 +766,6 @@ class ScrewStep(PedicleScrewSimulatorStep):
                 matrixScrew = vtk.vtkMatrix4x4()
                 transformFid.GetMatrixTransformToParent(matrixScrew)
 
-                # Calculate translation in reverse direction
                 # Calculate translation in reverse direction
                 newVal = value - self.driveTemp
 
@@ -755,8 +851,6 @@ class ScrewStep(PedicleScrewSimulatorStep):
         self.transformSlider1.enabled = True
         self.transformSlider2.enabled = True
         self.b.enabled = True
-        # Uncomment and reset the third slider if applicable
-        # self.transformSlider3.reset()
 
     def transformScrewComposite(self, inputMatrix):
         # Retrieve the transform node
@@ -830,14 +924,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
         level = slicer.modules.BART_PlanningWidget.landmarksStep.table2.cellWidget(x,1).currentText
         side = slicer.modules.BART_PlanningWidget.landmarksStep.table2.cellWidget(x,2).currentText
         self.fiduciallist.append(label + " / " + level + " / " + side)
-        #modelX = slicer.mrmlScene.GetNodeByID('vtkMRMLModelDisplayNode' + str(x + 4))
-        #modelX.SetSliceIntersectionVisibility(1)
-
       logging.debug("Fiducial list: {0}".format(self.fiduciallist))
-
-      #self.fiducial.clear()
-      #self.fiducial.addItem("Select an insertion site")
-      #self.fiducial.addItems(self.fiduciallist)
 
       super(ScrewStep, self).onEntry(comingFrom, transitionType)
 
@@ -862,23 +949,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
           return
 
       if goingTo.id() == 'Measurements':
-          '''
-          fiducialNode = self.fiducialNode()
-          fidCount = fiducialNode.GetNumberOfFiducials()
-          for i in range(fidCount):
-            fidName = fiducialNode.GetNthFiducialLabel(i)
-            screwModel = slicer.mrmlScene.GetFirstNodeByName('Screw at point %s' % fidName)
-            slicer.mrmlScene.RemoveNode(screwModel)
-
-          fiducialNode.RemoveAllMarkups()
-          '''
           slicer.modules.models.logic().SetAllModelsVisibility(0)
-
-          # modelDisplayNodes = slicer.util.getNodesByClass('vtkMRMLModelDisplayNode')
-          # for x in range(0,self.fidNode.GetNumberOfFiducials()):
-          #    modelX = slicer.mrmlScene.GetNodeByID( + str(x + 4))
-          #    modelX.SetSliceIntersectionVisibility(0)
-
           self.fidNode.SetLocked(0)
 
       if goingTo.id() == 'Grade':
@@ -887,6 +958,13 @@ class ScrewStep(PedicleScrewSimulatorStep):
             lineDisplayNode = lineModelNode.GetDisplayNode()
             if lineDisplayNode:
                 lineDisplayNode.SetVisibility(False)
+        numNodes = slicer.mrmlScene.GetNumberOfNodesByClass("vtkMRMLModelNode")
+        for i in range(numNodes):
+            node = slicer.mrmlScene.GetNthNodeByClass(i, "vtkMRMLModelNode")
+            if node.GetName().startswith("Screw at point"):
+                displayNode = node.GetDisplayNode()
+                if displayNode:
+                    displayNode.SetVisibility2D(False)
 
         self.doStepProcessing()
 
