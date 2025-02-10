@@ -4,6 +4,7 @@ from .PedicleScrewSimulatorStep import *
 from .Helper import *
 import math
 
+# TODO Add GR Score
 class GradeStep(PedicleScrewSimulatorStep):
 
     def __init__( self, stepid ):
