@@ -29,13 +29,7 @@ class MeasurementsStep( PedicleScrewSimulatorStep ):
       bl = slicer.util.findChildren(text='Final')
       if len(bl):
         bl[0].hide()
-    '''
-    def rulerMeasures(self):
-      self.rulerList = []
-      rulers = slicer.util.getNodesByClass('vtkMRMLMarkupsLine')
-      for ruler in rulers:
-        self.rulerList.append("%.2f" % ruler.GetMeasurement("length").GetValue())
-    '''
+
     def updateTable(self):
       self.fiducial = self.fiducialNode()
       self.fidNumber = self.fiducial.GetNumberOfControlPoints()
@@ -74,16 +68,9 @@ class MeasurementsStep( PedicleScrewSimulatorStep ):
           self.widthCombo.insert(i,qt.QComboBox())
           self.lengthCombo[i].addItem(" ")
           self.widthCombo[i].addItem(" ")
-          #self.rulerMeasures()
-          #self.measuresLength = qt.QComboBox()
-          #self.measuresLength.addItems(self.rulerList)
-          #self.measuresWidth = qt.QComboBox()
-          #self.measuresWidth.addItems(self.rulerList)
           if self.entryCount == 0:
             self.angleTable.setCellWidget(i,3, self.lengthCombo[i])
             self.angleTable.setCellWidget(i,4, self.widthCombo[i])
-      #self.entryCount = 1
-      # change entry count to update the contents to the list of rulers if = 1
 
     def onTableCellClicked(self):
       if self.angleTable.currentColumn() <= 2:
@@ -110,39 +97,45 @@ class MeasurementsStep( PedicleScrewSimulatorStep ):
       logging.debug("ruler added: {0}".format(self.entryCount))
       rulers = slicer.util.getNodesByClass('vtkMRMLMarkupsLineNode')
 
-      rulerX = rulers[-1] # last ruler
-      self.rulerList.append("%.2f" % rulerX.GetMeasurement("length").GetValue())
-      rulerX.AddObserver(slicer.vtkMRMLMarkupsNode.PointModifiedEvent, self.rulerLengthCheck)
-      self.rulerLengthCheck()
+      rulerX = rulers[-1]
+      rounded_length = self.round_to_05(rulerX.GetMeasurement("length").GetValue())
+      rounded_length_str = "%.1f" % rounded_length
 
-      for i in range(self.fidNumber):
-        #self.measuresLength = qt.QComboBox()
-        #self.measuresWidth = qt.QComboBox()
-        self.lengthCombo[i].addItem("%.2f" % rulerX.GetMeasurement("length").GetValue())
-        self.widthCombo[i].addItem("%.2f" % rulerX.GetMeasurement("length").GetValue())
-        #self.rulerLengths.append("%.2f" % rulerX.GetMeasurement("length").GetValue())
-        #self.angleTable.setCellWidget(i,3, self.measuresLength)
-        #self.angleTable.setCellWidget(i,4, self.measuresWidth)
+      self.rulerList.append(rounded_length_str)
+      rulerX.AddObserver(slicer.vtkMRMLMarkupsNode.PointModifiedEvent, self.rulerLengthCheck)
 
     def rulerLengthCheck(self, observer=None, event=None):
-      rulers = slicer.util.getNodesByClass('vtkMRMLMarkupsLineNode')
-      for i, ruler in enumerate(rulers):
-        length = ruler.GetMeasurement("length").GetValue()
-        lengthStr = "%.2f" % length
-        listIndex = i + 1  # first item in the list is the empty measurement
-        if lengthStr != self.rulerList[i]:
-          for lengthCombo in self.lengthCombo:
-            if listIndex >= lengthCombo.count:
-              lengthCombo.addItem(lengthStr)
-            else:
-              lengthCombo.setItemText(listIndex, lengthStr)
-        for widthCombo in self.widthCombo:
-          if listIndex >= widthCombo.count:
-            widthCombo.addItem(lengthStr)
-          else:
-            widthCombo.setItemText(listIndex, lengthStr)
+      rulers = [r for r in slicer.util.getNodesByClass('vtkMRMLMarkupsLineNode')
+                if r.GetNumberOfDefinedControlPoints() >= 2]
 
-      #self.rulerList.append("%.2f" % rulerX.GetMeasurement("length").GetValue())
+      # Build sets of unique "width-like" lengths and "length-like" lengths
+      widthValues = set()
+      lengthValues = set()
+      for ruler in rulers:
+        val = self.round_to_05(ruler.GetMeasurement("length").GetValue())
+        if val == 0.0:
+          continue
+        if val < 15.0:
+          widthValues.add(val)
+        else:
+          lengthValues.add(val)
+
+      # For each row’s combobox, clear and then repopulate
+      for widthCombo in self.widthCombo:
+        # Start by clearing, re-add blank item
+        widthCombo.clear()
+        widthCombo.addItem(" ")
+        for val in sorted(widthValues):
+          widthCombo.addItem(f"{val:.1f}")
+
+      for lengthCombo in self.lengthCombo:
+        lengthCombo.clear()
+        lengthCombo.addItem(" ")
+        for val in sorted(lengthValues):
+          lengthCombo.addItem(f"{val:.1f}")
+
+    def round_to_05(self, value):
+      return round(value * 2) / 2
 
     def sliceChange(self):
         logging.debug("changing")
@@ -156,6 +149,20 @@ class MeasurementsStep( PedicleScrewSimulatorStep ):
     def zoomIn(self):
       logging.debug("zoom")
       slicer.app.applicationLogic().PropagateVolumeSelection(1)
+      # Get the slice logic for Red
+      sliceWidget = slicer.app.layoutManager().sliceWidget("Red")
+      sliceLogic = sliceWidget.sliceLogic()
+      sliceNode = sliceLogic.GetSliceNode()
+
+      # Get current FOV
+      fov = sliceNode.GetFieldOfView()
+
+      # Reduce FOV by 20% to zoom in
+      newFov = [fov[0] * 0.2, fov[1] * 0.2, fov[2]]
+      sliceNode.SetFieldOfView(newFov[0], newFov[1], newFov[2])
+
+      # Update slice matrices to apply changes
+      sliceNode.UpdateMatrices()
 
     def makeFidAdjustments(self):
       if self.adjustCount == 0:
@@ -340,8 +347,6 @@ class MeasurementsStep( PedicleScrewSimulatorStep ):
         transform.RotateZ(value - self.oldPosition)
         redSlice.GetSliceToRAS().DeepCopy(transform.GetMatrix())
         redSlice.UpdateMatrices()
-      #self.slider.TypeOfTransform = self.slider.ROTATION_LR
-      #self.slider.applyTransformation(self.slider.value - self.oldPosition)
       self.oldPosition = value
 
     def validate( self, desiredBranchId ):
@@ -366,7 +371,7 @@ class MeasurementsStep( PedicleScrewSimulatorStep ):
       lm.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpRedSliceView)
 
       logging.debug("entering measurements")
-      self.zoomIn()
+      # self.zoomIn()
 
       # Enable Slice Intersections
       viewNodes = slicer.util.getNodesByClass('vtkMRMLSliceDisplayNode')
