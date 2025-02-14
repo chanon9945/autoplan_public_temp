@@ -81,10 +81,6 @@ class MeasurementsStep( PedicleScrewSimulatorStep ):
           self.fiducial.AddObserver(slicer.vtkMRMLMarkupsNode.PointModifiedEvent, self.fidMove)
 
     def fidMove(self, observer, event):
-
-      #coords = [0,0,0]
-      #observer.GetFiducialCoordinates(coords)
-      # self.sliceChange()
       pass
 
     @vtk.calldata_type(vtk.VTK_OBJECT)
@@ -351,12 +347,6 @@ class MeasurementsStep( PedicleScrewSimulatorStep ):
 
     def validate( self, desiredBranchId ):
       self.__parent.validate( desiredBranchId )
-      #volCheck = slicer.util.getNodesByClass('vtkMRMLScalarVolumeNode')[0]
-      #if volCheck != None:
-      #  self.__parent.validationSucceeded('pass')
-      #else:
-      #slicer.mrmlScene.Clear(0)
-      #  self.__parent.validationSucceeded('fail')
       self.__parent.validationSucceeded(desiredBranchId)
 
     def onEntry(self, comingFrom, transitionType):

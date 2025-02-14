@@ -66,13 +66,13 @@ class SegmentationStep(PedicleScrewSimulatorStep):
 
         # Fast mode checkbox
         self.fastCheckBox = qt.QCheckBox("Fast Mode")
-        self.fastCheckBox.checked = True
+        self.fastCheckBox.checked = False
         self.fastCheckBox.setToolTip("Enable fast mode for quicker, lower-resolution results.")
         self.__layout.addRow(self.fastCheckBox)
 
         # CPU mode checkbox
         self.cpuCheckBox = qt.QCheckBox("CPU Mode")
-        self.cpuCheckBox.checked = True
+        self.cpuCheckBox.checked = False
         self.cpuCheckBox.setToolTip("Enable CPU mode.")
         self.__layout.addRow(self.cpuCheckBox)
 

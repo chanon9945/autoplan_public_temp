@@ -84,7 +84,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
       widthText = qt.QLabel("Screw Width:    ")
       self.length = ctk.ctkComboBox()
       self.length.toolTip = "Select a screw to insert."
-      screwList = ['Select a length (mm)','47.5', '55.0','62.5','70.0']
+      screwList = ['Select a length (mm)','30.0','47.5', '55.0','62.5','70.0']
       self.length.addItems(screwList)
       self.connect(self.length, PythonQt.QtCore.SIGNAL('activated(QString)'), self.length_chosen)
       self.lengthMeasure = qt.QLineEdit()
@@ -276,7 +276,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
 
         #self.transformSlider3.reset()
 
-        screwCheck = slicer.mrmlScene.GetFirstNodeByName('Screw at point %s' % self.currentFidLabel)
+        screwCheck = slicer.mrmlScene.GetFirstNodeByName('Screw %s' % self.currentFidLabel)
 
         if screwCheck == None:
             self.transformSlider1.setValue(0)
@@ -313,6 +313,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
             self.zoomIn()
             self.sliceChange()
             self.updateScrew2DVisibility()
+            self.updateAlignmentLineVisibility()
 
     def length_chosen(self, text):
         if text != "Select a length (mm)":
@@ -332,7 +333,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
 
             self.screwPath = os.path.join(
                 os.path.dirname(slicer.modules.bart_planning.path),
-                f'Resources/ScrewModels/scaled_{sanitized_length}x{sanitized_diameter}.vtk'
+                f'Resources/ScrewModels/scaled_{sanitized_length}x{sanitized_diameter}.stl'
             )
             self.screwPath = self.screwPath.replace("\\", "/")
             logging.debug("Screw file path: {0}".format(self.screwPath))
@@ -341,7 +342,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
     def loadScrew(self):
         logging.debug("load screw button")
 
-        screwCheck = slicer.mrmlScene.GetFirstNodeByName('Screw at point %s' % self.currentFidLabel)
+        screwCheck = slicer.mrmlScene.GetFirstNodeByName('Screw %s' % self.currentFidLabel)
         if screwCheck != None:
             # screw already loaded
             return
@@ -352,19 +353,39 @@ class ScrewStep(PedicleScrewSimulatorStep):
             logging.error("Failed to load screw model: "+self.screwPath)
             return
 
+        # Create a transform node to fix potential LPS->RAS flip
+        flipMatrix = vtk.vtkMatrix4x4()
+        flipMatrix.Identity()
+        # Suppose we need to flip Y and Z:
+        flipMatrix.SetElement(1, 1, -1)
+        flipMatrix.SetElement(2, 2, -1)
+
+        fixTransformNode = slicer.vtkMRMLLinearTransformNode()
+        fixTransformNode.SetName("FixOrientationTransform")
+        slicer.mrmlScene.AddNode(fixTransformNode)
+        fixTransformNode.SetMatrixTransformToParent(flipMatrix)
+
+        # Assign the flip transform to the screw model
+        screwModel.SetAndObserveTransformNodeID(fixTransformNode.GetID())
+
+        # Harden transform => geometry is permanently updated in RAS
+        slicer.modules.transforms.logic().hardenTransform(screwModel)
+
+        # Now the screw model’s geometry is oriented in Slicer’s RAS space
+        # Next, translate it to self.coords via a separate transform
         matrix = vtk.vtkMatrix4x4()
-        matrix.DeepCopy((1, 0, 0, self.coords[0],
-                       0, -1, 0, self.coords[1],
-                       0, 0, -1, self.coords[2],
-                       0, 0, 0, 1))
+        matrix.Identity()
+        matrix.SetElement(0, 3, self.coords[0])
+        matrix.SetElement(1, 3, self.coords[1])
+        matrix.SetElement(2, 3, self.coords[2])
 
-        transformScrewTemp = slicer.vtkMRMLLinearTransformNode()
-        transformScrewTemp.SetName("Transform-%s" % self.currentFidLabel)
-        slicer.mrmlScene.AddNode(transformScrewTemp)
-        transformScrewTemp.ApplyTransformMatrix(matrix)
+        screwTransform = slicer.vtkMRMLLinearTransformNode()
+        screwTransform.SetName(f"Transform {self.currentFidLabel}")
+        slicer.mrmlScene.AddNode(screwTransform)
+        screwTransform.SetMatrixTransformToParent(matrix)
 
-        screwModel.SetName('Screw at point %s' % self.currentFidLabel)
-        screwModel.SetAndObserveTransformNodeID(transformScrewTemp.GetID())
+        screwModel.SetName('Screw %s' % self.currentFidLabel)
+        screwModel.SetAndObserveTransformNodeID(screwTransform.GetID())
 
         self.addLineAlignedWithScrew(screwModel)
 
@@ -401,8 +422,8 @@ class ScrewStep(PedicleScrewSimulatorStep):
         self.resetScrew()
 
     def delScrew(self):
-        transformFid = slicer.mrmlScene.GetFirstNodeByName('Transform-%s' % self.currentFidLabel)
-        screwModel = slicer.mrmlScene.GetFirstNodeByName('Screw at point %s' % self.currentFidLabel)
+        transformFid = slicer.mrmlScene.GetFirstNodeByName('Transform %s' % self.currentFidLabel)
+        screwModel = slicer.mrmlScene.GetFirstNodeByName('Screw %s' % self.currentFidLabel)
 
         if screwModel != None:
             slicer.mrmlScene.RemoveNode(transformFid)
@@ -412,14 +433,14 @@ class ScrewStep(PedicleScrewSimulatorStep):
 
     def fidMove(self, observer, event):
 
-        screwCheck = slicer.mrmlScene.GetFirstNodeByName('Screw at point %s' % observer.GetName())
+        screwCheck = slicer.mrmlScene.GetFirstNodeByName('Screw %s' % observer.GetName())
 
         if screwCheck != None:
           coords = [0,0,0]
           observer.GetFiducialCoordinates(coords)
 
           matrixScrew = vtk.vtkMatrix4x4()
-          transformFid = slicer.mrmlScene.GetFirstNodeByName('Transform-%s' % observer.GetName())
+          transformFid = slicer.mrmlScene.GetFirstNodeByName('Transform %s' % observer.GetName())
 
           matrixScrew = transformFid.GetMatrixTransformToParent(matrixScrew)
           matrixScrew.SetElement(0,3,coords[0])
@@ -430,19 +451,23 @@ class ScrewStep(PedicleScrewSimulatorStep):
           transformFid.UpdateScene(slicer.mrmlScene)
           self.sliceChange()
 
-          screwModel = slicer.mrmlScene.GetFirstNodeByName(f"Screw at point {self.currentFidLabel}")
+          screwModel = slicer.mrmlScene.GetFirstNodeByName(f"Screw {self.currentFidLabel}")
           if screwModel:
               self.addLineAlignedWithScrew(screwModel)
+              self.updateAlignmentLineVisibility()
         else:
           return
 
     def addLineAlignedWithScrew(self, screwNode):
-        # Remove old line node if present
-        existingLineNode = slicer.mrmlScene.GetFirstNodeByName("Screw Alignment Line")
+        # Create a unique alignment line name based on the screw's name.
+        alignmentNodeName = "Alignment Line " + screwNode.GetName()
+
+        # Remove any existing line node for this screw.
+        existingLineNode = slicer.mrmlScene.GetFirstNodeByName(alignmentNodeName)
         if existingLineNode:
             slicer.mrmlScene.RemoveNode(existingLineNode)
 
-        # Get screw transform to world
+        # Get screw transform to world.
         screwTransformMatrix = vtk.vtkMatrix4x4()
         screwTransformNode = screwNode.GetParentTransformNode()
         if screwTransformNode:
@@ -450,33 +475,34 @@ class ScrewStep(PedicleScrewSimulatorStep):
         else:
             screwTransformMatrix.Identity()
 
-        # Extract position and direction
+        # Extract the screw's position.
         screwPosition = [screwTransformMatrix.GetElement(i, 3) for i in range(3)]
+        # For the screw direction, here we use the second column of the matrix (index 1).
         screwDirection = [screwTransformMatrix.GetElement(i, 1) for i in range(3)]
 
-        # Define line endpoints
-        lineLength = 100.0
+        # Define the line endpoints (extending in both directions from the screw's position).
+        lineLength = 100.0  # You can adjust this value as needed.
         startPoint = [screwPosition[i] - lineLength * screwDirection[i] for i in range(3)]
         endPoint = [screwPosition[i] + lineLength * screwDirection[i] for i in range(3)]
 
-        # Create a line source
+        # Create a line source.
         lineSource = vtk.vtkLineSource()
         lineSource.SetPoint1(startPoint)
         lineSource.SetPoint2(endPoint)
         lineSource.Update()
 
-        # Create model node
-        lineModelNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "Screw Alignment Line")
+        # Create a new model node for the line.
+        lineModelNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", alignmentNodeName)
         lineModelNode.SetAndObservePolyData(lineSource.GetOutput())
 
-        # Create display node
+        # Create and configure a display node for the line.
         lineDisplayNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelDisplayNode")
-        lineDisplayNode.SetColor(1, 0, 0)  # red
+        lineDisplayNode.SetColor(1, 0, 0)  # Red color.
         lineDisplayNode.SetLineWidth(3)
         lineDisplayNode.SetVisibility2D(True)
         lineDisplayNode.SetSliceDisplayModeToProjection()
 
-        # Link display node to model node
+        # Link the display node to the model node.
         lineModelNode.SetAndObserveDisplayNodeID(lineDisplayNode.GetID())
 
     def cameraFocus(self, position):
@@ -636,7 +662,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
 
     def updateScrew2DVisibility(self):
         # Example fiducial label: "Fid1 / L4 / Left"
-        parts = self.currentFidLabel.split(" / ")
+        parts = self.currentFidLabel.split(" - ")
         if len(parts) < 3:
             logging.warning("Current fiducial label does not have 'Name / Level / Side' format.")
             return
@@ -649,11 +675,11 @@ class ScrewStep(PedicleScrewSimulatorStep):
         for modelNode in allModels:
             name = modelNode.GetName()
             # Only operate on screws
-            if not name.startswith("Screw at point"):
+            if not name.startswith("Screw"):
                 continue
 
-            # We expect name format like "Screw at point Fid1 / L4 / Left"
-            screwParts = name.replace("Screw at point", "").strip().split(" / ")
+            # We expect name format like "Screw Fid1 / L4 / Left"
+            screwParts = name.replace("Screw", "").strip().split(" - ")
             if len(screwParts) < 3:
                 continue
             screw_level = screwParts[1].strip()
@@ -682,6 +708,23 @@ class ScrewStep(PedicleScrewSimulatorStep):
             greenVisible = True  # Always visible
             greenDisp.SetVisibility2D(greenVisible)
 
+    def updateAlignmentLineVisibility(self):
+
+        alignmentPrefix = "Alignment Line"
+        currentAlignmentLineName = "Alignment Line Screw" + self.currentFidLabel
+
+        # Get all model nodes in the scene.
+        allNodes = slicer.util.getNodesByClass("vtkMRMLModelNode")
+        for node in allNodes:
+            nodeName = node.GetName()
+            if nodeName.startswith(alignmentPrefix):
+                displayNode = node.GetDisplayNode()
+                # Check if this is the Alignment Line for the current screw.
+                if nodeName == currentAlignmentLineName:
+                    displayNode.SetVisibility(True)
+                else:
+                    displayNode.SetVisibility(False)
+
     def driveScrew(self):
         sanitized_length = self.__length.replace('.', '')
         sanitized_diameter = self.__diameter.replace('.', '')
@@ -701,7 +744,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
 
             # Reverse direction for translation
             value = -value
-            transformFid = slicer.mrmlScene.GetFirstNodeByName(f'Transform-{self.currentFidLabel}')
+            transformFid = slicer.mrmlScene.GetFirstNodeByName(f'Transform {self.currentFidLabel}')
             if transformFid is not None:
                 # Get the current transformation matrix
                 matrixScrew = vtk.vtkMatrix4x4()
@@ -731,8 +774,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
                 # Update state variables
                 self.driveTemp = value
                 self.screwInsert += 1
-            else:
-                slicer.util.errorDisplay(f"Transform node 'Transform-{self.currentFidLabel}' not found.")
+
         else:
             # Stop the timer and reset variables
             self.timer.stop()
@@ -760,7 +802,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
             self.transformScrewComposite(matrix3)
 
             # Get the transform node for the screw
-            transformFid = slicer.mrmlScene.GetFirstNodeByName(f'Transform-{self.currentFidLabel}')
+            transformFid = slicer.mrmlScene.GetFirstNodeByName(f'Transform {self.currentFidLabel}')
             if transformFid is not None:
                 # Retrieve the current transformation matrix
                 matrixScrew = vtk.vtkMatrix4x4()
@@ -814,7 +856,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
         self.transformSlider2.reset()
 
         # Retrieve the transform node
-        transformFid = slicer.mrmlScene.GetFirstNodeByName(f'Transform-{self.currentFidLabel}')
+        transformFid = slicer.mrmlScene.GetFirstNodeByName(f'Transform {self.currentFidLabel}')
         if transformFid is not None:
             # Initialize a new transformation matrix
             matrixScrew = vtk.vtkMatrix4x4()
@@ -854,12 +896,12 @@ class ScrewStep(PedicleScrewSimulatorStep):
 
     def transformScrewComposite(self, inputMatrix):
         # Retrieve the transform node
-        transformFid = slicer.mrmlScene.GetFirstNodeByName(f'Transform-{self.currentFidLabel}')
+        transformFid = slicer.mrmlScene.GetFirstNodeByName(f'Transform {self.currentFidLabel}')
         if transformFid is not None:
             # Get the current transformation matrix
             matrixScrew = vtk.vtkMatrix4x4()
             transformFid.GetMatrixTransformToParent(matrixScrew)
-            screwModel = slicer.mrmlScene.GetFirstNodeByName(f"Screw at point {self.currentFidLabel}")
+            screwModel = slicer.mrmlScene.GetFirstNodeByName(f"Screw {self.currentFidLabel}")
             if screwModel:
                 self.addLineAlignedWithScrew(screwModel)
 
@@ -901,7 +943,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
             # Notify Slicer of changes
             slicer.mrmlScene.Modified()
         else:
-            slicer.util.errorDisplay(f"Transform node 'Transform-{self.currentFidLabel}' not found.")
+            slicer.util.errorDisplay(f"Transform node 'Transform {self.currentFidLabel}' not found.")
 
     def validate( self, desiredBranchId ):
 
@@ -923,7 +965,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
         label = self.fidNode.GetNthControlPointLabel(x)
         level = slicer.modules.BART_PlanningWidget.landmarksStep.table2.cellWidget(x,1).currentText
         side = slicer.modules.BART_PlanningWidget.landmarksStep.table2.cellWidget(x,2).currentText
-        self.fiduciallist.append(label + " / " + level + " / " + side)
+        self.fiduciallist.append(label + " - " + level + " - " + side)
       logging.debug("Fiducial list: {0}".format(self.fiduciallist))
 
       super(ScrewStep, self).onEntry(comingFrom, transitionType)
@@ -940,36 +982,25 @@ class ScrewStep(PedicleScrewSimulatorStep):
 
       qt.QTimer.singleShot(0, self.killButton)
 
-
     def onExit(self, goingTo, transitionType):
+        self.fidNode.RemoveObserver(self.fidNodeObserver)
 
-      self.fidNode.RemoveObserver(self.fidNodeObserver)
+        if goingTo.id() not in ['Grade', 'Measurements']:
+            return
 
-      if goingTo.id() != 'Grade' and goingTo.id() != 'Measurements':
-          return
+        if goingTo.id() == 'Measurements':
+            slicer.modules.models.logic().SetAllModelsVisibility(0)
+            self.fidNode.SetLocked(0)
+        elif goingTo.id() == 'Grade':
+            for node in slicer.util.getNodesByClass("vtkMRMLModelNode"):
+                name = node.GetName()
+                display = node.GetDisplayNode()
+                if display:
+                    if name.startswith("Alignment Line Screw"):
+                        display.SetVisibility(False)
+            self.doStepProcessing()
 
-      if goingTo.id() == 'Measurements':
-          slicer.modules.models.logic().SetAllModelsVisibility(0)
-          self.fidNode.SetLocked(0)
-
-      if goingTo.id() == 'Grade':
-        lineModelNode = slicer.util.getNode("Screw Alignment Line*")
-        if lineModelNode:
-            lineDisplayNode = lineModelNode.GetDisplayNode()
-            if lineDisplayNode:
-                lineDisplayNode.SetVisibility(False)
-        numNodes = slicer.mrmlScene.GetNumberOfNodesByClass("vtkMRMLModelNode")
-        for i in range(numNodes):
-            node = slicer.mrmlScene.GetNthNodeByClass(i, "vtkMRMLModelNode")
-            if node.GetName().startswith("Screw at point"):
-                displayNode = node.GetDisplayNode()
-                if displayNode:
-                    displayNode.SetVisibility2D(False)
-
-        self.doStepProcessing()
-
-      super(ScrewStep, self).onExit(goingTo, transitionType)
-
+        super(ScrewStep, self).onExit(goingTo, transitionType)
 
     def doStepProcessing(self):
 
