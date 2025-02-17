@@ -84,7 +84,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
       widthText = qt.QLabel("Screw Width:    ")
       self.length = ctk.ctkComboBox()
       self.length.toolTip = "Select a screw to insert."
-      screwList = ['Select a length (mm)','30.0','47.5', '55.0','62.5','70.0']
+      screwList = ['Select a length (mm)','30','35','40','45','50','55','60','65', '70','75']
       self.length.addItems(screwList)
       self.connect(self.length, PythonQt.QtCore.SIGNAL('activated(QString)'), self.length_chosen)
       self.lengthMeasure = qt.QLineEdit()
@@ -99,7 +99,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
 
       self.diameter = ctk.ctkComboBox()
       self.diameter.toolTip = "Select a screw to insert."
-      screwList = ['Select a diameter (mm)','3.0', '3.5', '4.5', '5.0']
+      screwList = ['Select a diameter (mm)','3', '3.5', '4', '4.5']
       self.diameter.addItems(screwList)
       self.widthMeasure = qt.QLineEdit()
       self.connect(self.diameter, PythonQt.QtCore.SIGNAL('activated(QString)'), self.diameter_chosen)
@@ -327,13 +327,10 @@ class ScrewStep(PedicleScrewSimulatorStep):
 
     def combo_chosen(self):
         if self.__length != "Select a length (mm)" and self.__diameter != "Select a diameter (mm)":
-            # Remove any '.' in length and diameter
-            sanitized_length = self.__length.replace('.', '')
-            sanitized_diameter = self.__diameter.replace('.', '')
 
             self.screwPath = os.path.join(
                 os.path.dirname(slicer.modules.bart_planning.path),
-                f'Resources/ScrewModels/scaled_{sanitized_length}x{sanitized_diameter}.stl'
+                f'Resources/ScrewModels/{self.__diameter}x{self.__length}.stl'
             )
             self.screwPath = self.screwPath.replace("\\", "/")
             logging.debug("Screw file path: {0}".format(self.screwPath))
@@ -407,8 +404,8 @@ class ScrewStep(PedicleScrewSimulatorStep):
         self.screwSliceDisplays[screwModel.GetName()] = sliceDisplays
 
         screwDescrip[0] = self.currentFidLabel
-        screwDescrip[1] = self.__length
-        screwDescrip[2] = self.__diameter
+        screwDescrip[1] = self.__diameter
+        screwDescrip[2] = self.__length
 
         self.screwList.append(screwDescrip)
         self.screwCount += 1
@@ -726,9 +723,8 @@ class ScrewStep(PedicleScrewSimulatorStep):
                     displayNode.SetVisibility(False)
 
     def driveScrew(self):
-        sanitized_length = self.__length.replace('.', '')
         sanitized_diameter = self.__diameter.replace('.', '')
-        if self.screwInsert < int(sanitized_diameter):
+        if self.screwInsert < int(self.__length):
 
             value = self.screwInsert
             # attempt to rotate with driving
@@ -782,9 +778,8 @@ class ScrewStep(PedicleScrewSimulatorStep):
             self.driveTemp = 0
 
     def reverseScrew(self):
-        sanitized_length = self.__length.replace('.', '')
         sanitized_diameter = self.__diameter.replace('.', '')
-        if self.screwInsert < int(sanitized_diameter):
+        if self.screwInsert < int(self.__length):
 
             value = self.screwInsert
             # Calculate the reverse rotation angle
