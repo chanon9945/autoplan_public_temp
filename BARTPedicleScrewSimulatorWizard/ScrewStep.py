@@ -263,7 +263,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
 
         # Define your standard sets
         standardLengths = [30, 35, 40, 45, 50, 55, 60, 65, 70, 75]
-        standardDiameters = [3.0, 3.5, 4.0, 4.5]
+        standardDiameters = [3, 3.5, 4, 4.5]
 
         # Helper: pick the nearest item
         def nearestBelowOrEqual(std_list, measured):
