@@ -221,33 +221,61 @@ class MeasurementsStep(PedicleScrewSimulatorStep):
         rulerX.AddObserver(slicer.vtkMRMLMarkupsNode.PointModifiedEvent, self.rulerLengthCheck)
 
     def rulerLengthCheck(self, observer=None, event=None):
-        rulers = [
-            r for r in slicer.util.getNodesByClass('vtkMRMLMarkupsLineNode')
-            if r.GetNumberOfDefinedControlPoints() >= 2
-        ]
+      self.storeCurrentComboSelectionsInDict()
 
-        widthValues = set()
-        lengthValues = set()
-        for ruler in rulers:
-            val = self.round_to_05(ruler.GetMeasurement("length").GetValue())
-            if val == 0.0:
-                continue
-            if val < 15.0:
-                widthValues.add(val)
-            else:
-                lengthValues.add(val)
+      # Gather all MarkupsLineNodes that have at least 2 valid points
+      rulers = [
+        r for r in slicer.util.getNodesByClass('vtkMRMLMarkupsLineNode')
+        if r.GetNumberOfDefinedControlPoints() >= 2
+      ]
 
-        for widthCB in self.widthCombo:
-            widthCB.clear()
-            widthCB.addItem(" ")
-            for val in sorted(widthValues):
-                widthCB.addItem(f"{val:.1f}")
+      widthValues = set()
+      lengthValues = set()
 
-        for lengthCB in self.lengthCombo:
-            lengthCB.clear()
-            lengthCB.addItem(" ")
-            for val in sorted(lengthValues):
-                lengthCB.addItem(f"{val:.1f}")
+      # Figure out which measured lengths are "width" and which are "length".
+      for ruler in rulers:
+        val = self.round_to_05(ruler.GetMeasurement("length").GetValue())
+        if val == 0.0:
+          continue
+        if val < 15.0:
+          widthValues.add(val)
+        else:
+          lengthValues.add(val)
+
+      # Re-populate all combos, but do NOT lose the user’s existing choices.
+      for i, widthCB in enumerate(self.widthCombo):
+        currentFidLabel = self.fidLabels[i]
+        (savedLength, savedWidth) = self.selectedComboValues.get(currentFidLabel, (" ", " "))
+
+        # Clear and re-populate
+        widthCB.blockSignals(True)  # Temporarily block signals to avoid triggering onWidthComboChanged repeatedly
+        widthCB.clear()
+        widthCB.addItem(" ")
+        for val in sorted(widthValues):
+          widthCB.addItem(f"{val:.1f}")
+        widthCB.blockSignals(False)
+
+        # Restore user selection if it still exists in the new list
+        if savedWidth.strip():
+          idx = widthCB.findText(savedWidth)
+          if idx >= 0:
+            widthCB.setCurrentIndex(idx)
+
+      for i, lengthCB in enumerate(self.lengthCombo):
+        currentFidLabel = self.fidLabels[i]
+        (savedLength, savedWidth) = self.selectedComboValues.get(currentFidLabel, (" ", " "))
+
+        lengthCB.blockSignals(True)
+        lengthCB.clear()
+        lengthCB.addItem(" ")
+        for val in sorted(lengthValues):
+          lengthCB.addItem(f"{val:.1f}")
+        lengthCB.blockSignals(False)
+
+        if savedLength.strip():
+          idx = lengthCB.findText(savedLength)
+          if idx >= 0:
+            lengthCB.setCurrentIndex(idx)
 
     def round_to_05(self, value):
         return round(value * 2) / 2
