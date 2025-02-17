@@ -74,6 +74,7 @@ class GradeStep(PedicleScrewSimulatorStep):
 
       self.updateTable()
 
+    def save3DModel(self):
       # Prompt user to select output folder
       folder = qt.QFileDialog.getExistingDirectory(None, "Select Folder to Save Screws and Segmentations")
       if not folder:
@@ -129,13 +130,13 @@ class GradeStep(PedicleScrewSimulatorStep):
       mergedNode.SetAndObservePolyData(appendFilter.GetOutput())
 
       # Save merged model
-      mergedFilePath = os.path.join(newFolderPath, "MergedModel.obj")
+      mergedFilePath = os.path.join(newFolderPath, "MergedSegmentation.obj")
       slicer.util.saveNode(mergedNode, mergedFilePath)
 
       qt.QMessageBox.information(
           None,
           "Saved Successfully",
-          f"Screws and merged segmentations saved to:\n{mergedFilePath}"
+          f"Screws and merged segmentations saved to:\n{newFolderPath}"
       )
 
     def onTableCellClicked(self):
