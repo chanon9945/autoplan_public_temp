@@ -73,6 +73,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
 
       self.fiducial = ctk.ctkComboBox()
       self.fiducial.toolTip = "Select an insertion site."
+      self.fiducial.addItem("Select an insertion landmark")
       self.fiducial.addItems(self.fiduciallist)
       self.connect(self.fiducial, PythonQt.QtCore.SIGNAL('activated(QString)'), self.fiducial_chosen)
 
@@ -240,11 +241,68 @@ class ScrewStep(PedicleScrewSimulatorStep):
       logging.debug("Screw list: {0}".format(self.screwList))
 
     def updateMeasurements(self):
-      pedicleLength = slicer.modules.BART_PlanningWidget.measurementsStep.angleTable.cellWidget(self.currentFidIndex,3).currentText
-      pedicleWidth = slicer.modules.BART_PlanningWidget.measurementsStep.angleTable.cellWidget(self.currentFidIndex,4).currentText
-      self.lengthMeasure.setText(pedicleLength + " mm")
-      self.widthMeasure.setText(pedicleWidth + " mm")
-      logging.debug("Pedicle length: {0}".format(pedicleLength))
+        pedicleLengthStr = slicer.modules.BART_PlanningWidget.measurementsStep.angleTable.cellWidget(
+            self.currentFidIndex, 3
+        ).currentText
+        pedicleWidthStr = slicer.modules.BART_PlanningWidget.measurementsStep.angleTable.cellWidget(
+            self.currentFidIndex, 4
+        ).currentText
+
+        try:
+            pedicleLength = float(pedicleLengthStr.replace(" mm", "").strip())
+        except:
+            pedicleLength = 0.0
+        try:
+            pedicleWidth = float(pedicleWidthStr.replace(" mm", "").strip())
+        except:
+            pedicleWidth = 0.0
+
+        # Show them in the QLineEdit fields
+        self.lengthMeasure.setText(pedicleLengthStr + " mm")
+        self.widthMeasure.setText(pedicleWidthStr + " mm")
+
+        # Define your standard sets
+        standardLengths = [30, 35, 40, 45, 50, 55, 60, 65, 70, 75]
+        standardDiameters = [3.0, 3.5, 4.0, 4.5]
+
+        # Helper: pick the nearest item
+        def nearestBelowOrEqual(std_list, measured):
+            # Filter to items <= measured
+            valid = [x for x in std_list if x <= measured]
+            if not valid:
+                return std_list[0]
+            return min(valid, key=lambda x: abs(x - measured))
+
+        # Find "nearest below/equal" standard length
+        if standardLengths:
+            chosenLength = nearestBelowOrEqual(standardLengths, pedicleLength)
+        else:
+            chosenLength = 0
+
+        # Find "nearest below/equal" standard diameter
+        if standardDiameters:
+            chosenDiameter = nearestBelowOrEqual(standardDiameters, pedicleWidth)
+        else:
+            chosenDiameter = 0
+
+        # Update combo boxes
+        if chosenLength in standardLengths:
+            lengthIndex = standardLengths.index(chosenLength) + 1
+            self.length.setCurrentIndex(lengthIndex)
+            self.__length = str(chosenLength)
+        else:
+            self.length.setCurrentIndex(0)
+            self.__length = "Select a length (mm)"
+
+        if chosenDiameter in standardDiameters:
+            diameterIndex = standardDiameters.index(chosenDiameter) + 1
+            self.diameter.setCurrentIndex(diameterIndex)
+            self.__diameter = str(chosenDiameter)
+        else:
+            self.diameter.setCurrentIndex(0)
+            self.__diameter = "Select a diameter (mm)"
+
+        self.combo_chosen()
 
     def screwLandmarks(self):
       self.fiducial = self.fiducialNode()
@@ -301,13 +359,15 @@ class ScrewStep(PedicleScrewSimulatorStep):
         self.transformSlider2.enabled = True
 
     def fiducial_chosen(self, text):
-        if text != "Select an insertion landmark":
+        if text == "Select an insertion landmark":
+            return  # do nothing
+        else:
             self.__fiducial = text
             self.currentFidIndex = self.fiducial.currentIndex
             self.currentFidLabel = self.fiducial.currentText
             self.fidNode.GetNthControlPointPosition(self.currentFidIndex,self.coords)
             logging.debug("Current fid index = {0}, label = {1}, coords = {2}".format(
-              self.currentFidIndex, self.currentFidLabel, self.coords))
+            self.currentFidIndex, self.currentFidLabel, self.coords))
             self.updateMeasurements()
             self.combo_chosen()
             self.zoomIn()
@@ -945,37 +1005,75 @@ class ScrewStep(PedicleScrewSimulatorStep):
       self.__parent.validate( desiredBranchId )
       self.__parent.validationSucceeded(desiredBranchId)
 
+    def updateFiducialComboBox(self):
+        # 1) Clear the Python list and the combo box widget
+        self.fiduciallist.clear()
+        self.fiducial.clear()
+
+        # 2) Grab the latest fiducial node
+        if not self.fidNode:
+            logging.debug("No fiducial node found—cannot update combo box.")
+            return
+
+        # 3) Loop over control points in the fiducial node and build new entries
+        numPoints = self.fidNode.GetNumberOfControlPoints()
+        for i in range(numPoints):
+            # Example: extract label, level, side from the BART tables
+            label = self.fidNode.GetNthControlPointLabel(i)
+            level = slicer.modules.BART_PlanningWidget.landmarksStep.table2.cellWidget(i, 1).currentText
+            side = slicer.modules.BART_PlanningWidget.landmarksStep.table2.cellWidget(i, 2).currentText
+            combined = f"{label} - {level} - {side}"
+            self.fiduciallist.append(combined)
+
+        # 4) Populate the combo box with all new items
+        self.fiducial.addItems(self.fiduciallist)
+
+        logging.debug(f"Combo box updated with fiduciallist: {self.fiduciallist}")
 
     def onEntry(self, comingFrom, transitionType):
 
-      self.fidNode = self.fiducialNode()
-      self.fidNodeObserver = self.fidNode.AddObserver(vtk.vtkCommand.ModifiedEvent,self.fidMove)
+        # 1) Retrieve or set up the fiducial list
+        self.fidNode = self.fiducialNode()
+        self.fidNodeObserver = self.fidNode.AddObserver(vtk.vtkCommand.ModifiedEvent, self.fidMove)
 
-      logging.debug("Fiducial node: {0}".format(self.fidNode))
+        super(ScrewStep, self).onEntry(comingFrom, transitionType)
 
-      self.fidNode.SetLocked(1)
-      slicer.modules.models.logic().SetAllModelsVisibility(1)
+        self.fidNode.SetLocked(1)
+        slicer.modules.models.logic().SetAllModelsVisibility(1)
 
-      for x in range (0,self.fidNode.GetNumberOfControlPoints()):
-        label = self.fidNode.GetNthControlPointLabel(x)
-        level = slicer.modules.BART_PlanningWidget.landmarksStep.table2.cellWidget(x,1).currentText
-        side = slicer.modules.BART_PlanningWidget.landmarksStep.table2.cellWidget(x,2).currentText
-        self.fiduciallist.append(label + " - " + level + " - " + side)
-      logging.debug("Fiducial list: {0}".format(self.fiduciallist))
+        # 2) Populate the combo box with current fiducials
+        self.updateFiducialComboBox()
 
-      super(ScrewStep, self).onEntry(comingFrom, transitionType)
+        # ----------------------------------------------------------------------
+        # 3) Attempt to find the "T-1" landmark by scanning the updated fiducial list
+        t1Index = -1
+        for i, label in enumerate(self.fiduciallist):
+            # Depending on how you name your landmarks, you can adjust this check;
+            # for example: if label == "T-1" or "T-1" in label, etc.
+            if "T-1" in label:
+                t1Index = i
+                break
 
-      lm = slicer.app.layoutManager()
-      if lm == None:
-        return
-      lm.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
+        # 4) If T-1 is found, select it in the combobox and call the usual callback
+        if t1Index >= 0:
+            self.fiducial.setCurrentIndex(t1Index)
+            self.fiducial_chosen(self.fiducial.currentText)
+            self.zoomIn()
+            self.sliceChange()
 
-      pNode = self.parameterNode()
-      pNode.SetParameter('currentStep', self.stepid)
-      logging.debug("Current step: {0}".format(pNode.GetParameter('currentStep')))
-      self.approach = str(pNode.GetParameter('approach'))
+        # Now set up the layout
+        lm = slicer.app.layoutManager()
+        if lm == None:
+            return
+        lm.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
 
-      qt.QTimer.singleShot(0, self.killButton)
+        # Retrieve parameter node
+        pNode = self.parameterNode()
+        pNode.SetParameter('currentStep', self.stepid)
+        logging.debug("Current step: {0}".format(pNode.GetParameter('currentStep')))
+        self.approach = str(pNode.GetParameter('approach'))
+
+        qt.QTimer.singleShot(0, self.killButton)
 
     def onExit(self, goingTo, transitionType):
         self.fidNode.RemoveObserver(self.fidNodeObserver)
