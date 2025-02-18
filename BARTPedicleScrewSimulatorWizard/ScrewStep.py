@@ -14,7 +14,8 @@ class ScrewStep(PedicleScrewSimulatorStep):
     def __init__( self, stepid ):
       self.initialize( stepid )
       self.setName( '5. Place Screws' )
-      self.setDescription( 'Load screw models and change orientation using sliders' )
+      self.setDescription("Select an insertion landmark and choose the desired screw dimensions. "
+                          "Use the sliders to adjust the screw’s orientation and confirm its placement.")
       self.screwPath = None
       self.screwName = None
       self.coords = [0,0,0]
@@ -400,8 +401,12 @@ class ScrewStep(PedicleScrewSimulatorStep):
         logging.debug("load screw button")
 
         screwCheck = slicer.mrmlScene.GetFirstNodeByName('Screw %s' % self.currentFidLabel)
-        if screwCheck != None:
+        if screwCheck is not None:
             # screw already loaded
+            return
+
+        if self.currentFidIndex < len(self.screwList) and self.screwList[self.currentFidIndex] is not None:
+            logging.debug("Screw already recorded in screwList; no need to load again.")
             return
 
         screwDescrip = ["0","0","0","0","0","0"]
@@ -467,7 +472,11 @@ class ScrewStep(PedicleScrewSimulatorStep):
         screwDescrip[1] = self.__diameter
         screwDescrip[2] = self.__length
 
-        self.screwList.append(screwDescrip)
+        if self.currentFidIndex < len(self.screwList):
+            self.screwList[self.currentFidIndex] = screwDescrip
+        else:
+            self.screwList.append(screwDescrip)
+
         self.screwCount += 1
 
         self.insertScrewButton.enabled = True
@@ -479,14 +488,19 @@ class ScrewStep(PedicleScrewSimulatorStep):
         self.resetScrew()
 
     def delScrew(self):
+        # Delete the screw nodes from the scene.
         transformFid = slicer.mrmlScene.GetFirstNodeByName('Transform %s' % self.currentFidLabel)
         screwModel = slicer.mrmlScene.GetFirstNodeByName('Screw %s' % self.currentFidLabel)
 
-        if screwModel != None:
+        if screwModel is not None:
             slicer.mrmlScene.RemoveNode(transformFid)
             slicer.mrmlScene.RemoveNode(screwModel)
         else:
             return
+
+        # Also clear the corresponding screwList entry so that a later load will not duplicate it.
+        if self.currentFidIndex < len(self.screwList):
+            self.screwList[self.currentFidIndex] = None
 
     def fidMove(self, observer, event):
 
@@ -1032,7 +1046,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
 
     def onEntry(self, comingFrom, transitionType):
 
-        # 1) Retrieve or set up the fiducial list
+        # Retrieve or set up the fiducial list
         self.fidNode = self.fiducialNode()
         self.fidNodeObserver = self.fidNode.AddObserver(vtk.vtkCommand.ModifiedEvent, self.fidMove)
 
@@ -1041,20 +1055,19 @@ class ScrewStep(PedicleScrewSimulatorStep):
         self.fidNode.SetLocked(1)
         slicer.modules.models.logic().SetAllModelsVisibility(1)
 
-        # 2) Populate the combo box with current fiducials
+        # Populate the combo box with current fiducials
         self.updateFiducialComboBox()
 
         # ----------------------------------------------------------------------
-        # 3) Attempt to find the "T-1" landmark by scanning the updated fiducial list
+        # Attempt to find the "T-1" landmark by scanning the updated fiducial list
         t1Index = -1
         for i, label in enumerate(self.fiduciallist):
-            # Depending on how you name your landmarks, you can adjust this check;
-            # for example: if label == "T-1" or "T-1" in label, etc.
+            # Depending on how you name your landmarks, you can adjust this check
             if "T-1" in label:
                 t1Index = i
                 break
 
-        # 4) If T-1 is found, select it in the combobox and call the usual callback
+        # If T-1 is found, select it in the combobox and call the usual callback
         if t1Index >= 0:
             self.fiducial.setCurrentIndex(t1Index)
             self.fiducial_chosen(self.fiducial.currentText)

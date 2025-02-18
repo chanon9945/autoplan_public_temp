@@ -9,10 +9,10 @@ class LandmarksStep(PedicleScrewSimulatorStep):
     def __init__(self, stepid):
         self.initialize(stepid)
         self.setName('3. Identify Insertion Landmarks')
-        self.setDescription('Place at least one fiducial on the spine to mark a screw insertion point.')
+        self.setDescription("Place at least one fiducial on the spine to mark a screw insertion point. "
+                            "Use the table to review and adjust the lumbar level (L1–L5) and side (Left/Right) for each marker.")
         self.__parent = super(LandmarksStep, self)
         qt.QTimer.singleShot(0, self.killButton)
-        # Define lumbar level options
         self.levelselection = ["L1", "L2", "L3", "L4", "L5"]
         self.startCount = 0
         self.addCount = 0
@@ -169,7 +169,7 @@ class LandmarksStep(PedicleScrewSimulatorStep):
             0
         )
 
-        # Map the label value to a lumbar level. Adjust these mappings to suit your data.
+        # Map the label value to a lumbar level.
         levelMapping = {
             5: "L1",
             4: "L2",
@@ -198,19 +198,17 @@ class LandmarksStep(PedicleScrewSimulatorStep):
         position = [0, 0, 0]
         self.fiducial.GetNthControlPointPosition(fidIndex, position)
 
-        # First, get the segmentation node.
+        # get the segmentation node.
         try:
             segNode = slicer.util.getNode("Segmentation")
         except Exception as e:
             logging.error("Segmentation node not found: " + str(e))
             return
 
-        # Now, try to get the labelmap node; if not found, create one.
         try:
             labelmapNode = slicer.util.getNode("SegmentationLabelmap")
         except Exception as e:
             logging.error("Labelmap node 'SegmentationLabelmap' not found: " + str(e))
-            # Create a new labelmap node named "SegmentationLabelmap" using the segmentation.
             labelmapNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "SegmentationLabelmap")
             success = slicer.modules.segmentations.logic().ExportSegmentsToLabelmapNode(
                 segNode,
@@ -343,7 +341,6 @@ class LandmarksStep(PedicleScrewSimulatorStep):
 
         pNode = self.parameterNode()
         logging.debug(pNode)
-        # levelselection is already set in __init__
 
         camera = slicer.mrmlScene.GetNodeByID('vtkMRMLCameraNode1')
         camera.SetPosition(0, -600, 0)

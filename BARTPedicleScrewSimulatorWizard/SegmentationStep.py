@@ -9,7 +9,10 @@ class SegmentationStep(PedicleScrewSimulatorStep):
     def __init__(self, stepid):
         self.initialize(stepid)
         self.setName('2. Segmentation Step')
-        self.setDescription('Spine segmentation step')
+        self.setDescription(
+                            "This step segments the spine by separating vertebrae from surrounding tissues. "
+                            "Choose the input volume, set the output segmentation, select a segmentation task, "
+                            "and adjust performance modes before running the TotalSegmentator to obtain a refined.")
         self.__parent = super(SegmentationStep, self)
 
     def killButton(self):
@@ -20,10 +23,6 @@ class SegmentationStep(PedicleScrewSimulatorStep):
 
     def createUserInterface(self):
         self.__layout = self.__parent.createUserInterface()
-
-        self.infoLabel = qt.QLabel("This is an segmentation step to separate spine from surrounding tissues.")
-        self.infoLabel.setWordWrap(True)
-        self.__layout.addRow(self.infoLabel)
 
         # Input volume selector with label
         inputLabel = qt.QLabel("Input Volume:")
@@ -77,7 +76,7 @@ class SegmentationStep(PedicleScrewSimulatorStep):
         self.__layout.addRow(self.cpuCheckBox)
 
         # Add TotalSegmentator Button with color
-        self.segmentButton = qt.QPushButton("Run TotalSegmentator")
+        self.segmentButton = qt.QPushButton("Run Spine Segmentation")
         self.segmentButton.toolTip = "Segment anatomical structures using TotalSegmentator."
         self.segmentButton.setStyleSheet(
             "background-color: orange; font-weight: bold; border-radius: 3px; padding: 5px;")

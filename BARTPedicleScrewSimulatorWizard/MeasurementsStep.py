@@ -10,7 +10,8 @@ class MeasurementsStep(PedicleScrewSimulatorStep):
     def __init__(self, stepid):
         self.initialize(stepid)
         self.setName('4. Measurements')
-        self.setDescription('Make Anatomical Measurements')
+        self.setDescription("Make anatomical measurements by drawing and adjusting lines on the image. "
+                            "Use the controls below to start/stop measuring, adjust landmarks, and modify the slice view. ")
 
         self.__parent = super(MeasurementsStep, self)
         qt.QTimer.singleShot(0, self.killButton)

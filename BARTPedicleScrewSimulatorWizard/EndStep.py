@@ -19,16 +19,12 @@ class EndStep(PedicleScrewSimulatorStep):
         bl[0].hide()
 
     def createUserInterface( self ):
-      '''
-      '''
       self.__layout = self.__parent.createUserInterface()
 
       # self.updateWidgetFromParameters(self.parameterNode())
       qt.QTimer.singleShot(0, self.killButton)
 
     def validate( self, desiredBranchId ):
-      '''
-      '''
       self.__parent.validate( desiredBranchId )
       self.__parent.validationSucceeded(desiredBranchId)
 

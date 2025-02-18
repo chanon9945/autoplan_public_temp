@@ -4,37 +4,63 @@ set(MODULE_NAME BART_Planning)
 #-----------------------------------------------------------------------------
 set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py
-  PedicleScrewSimulatorWizard/__init__.py
-  PedicleScrewSimulatorWizard/IntermediateStep.py
-  PedicleScrewSimulatorWizard/DefineROIStep.py
-  PedicleScrewSimulatorWizard/EndStep.py
-  PedicleScrewSimulatorWizard/GradeStep.py
-  PedicleScrewSimulatorWizard/Helper.py
-  PedicleScrewSimulatorWizard/LandmarksStep.py
-  PedicleScrewSimulatorWizard/LoadDataStep.py
-  PedicleScrewSimulatorWizard/MeasurementsStep.py
-  PedicleScrewSimulatorWizard/PedicleScrewSimulatorStep.py
-  PedicleScrewSimulatorWizard/ScrewStep.py
+  BARTPedicleScrewSimulatorWizard/__init__.py
+  BARTPedicleScrewSimulatorWizard/DefineROIStep.py
+  BARTPedicleScrewSimulatorWizard/EndStep.py
+  BARTPedicleScrewSimulatorWizard/GradeStep.py
+  BARTPedicleScrewSimulatorWizard/Helper.py
+  BARTPedicleScrewSimulatorWizard/LandmarksStep.py
+  BARTPedicleScrewSimulatorWizard/LoadDataStep.py
+  BARTPedicleScrewSimulatorWizard/MeasurementsStep.py
+  BARTPedicleScrewSimulatorWizard/PedicleScrewSimulatorStep.py
+  BARTPedicleScrewSimulatorWizard/ScrewStep.py
+  BARTPedicleScrewSimulatorWizard/SegmentationStep.py
+  BARTPedicleScrewSimulatorWizard/TotalSegmentator.py
 )
   )
 
 set(MODULE_PYTHON_RESOURCES
   Resources/Icons/${MODULE_NAME}.png
-  Resources/ScrewModels/scaled_475x30.vtk
-  Resources/ScrewModels/scaled_475x35.vtk
-  Resources/ScrewModels/scaled_475x40.vtk
-  Resources/ScrewModels/scaled_475x45.vtk
-  Resources/ScrewModels/scaled_550x30.vtk
-  Resources/ScrewModels/scaled_550x40.vtk
-  Resources/ScrewModels/scaled_550x45.vtk
-  Resources/ScrewModels/scaled_625x35.vtk
-  Resources/ScrewModels/scaled_625x40.vtk
-  Resources/ScrewModels/scaled_625x45.vtk
-  Resources/ScrewModels/scaled_625x50.vtk
-  Resources/ScrewModels/scaled_700x35.vtk
-  Resources/ScrewModels/scaled_700x40.vtk
-  Resources/ScrewModels/scaled_700x45.vtk
-  Resources/ScrewModels/scaled_700x50.vtk
+  Resources/ScrewModels/3.5x30.stl
+  Resources/ScrewModels/3.5x35.stl
+  Resources/ScrewModels/3.5x40.stl
+  Resources/ScrewModels/3.5x45.stl
+  Resources/ScrewModels/3.5x50.stl
+  Resources/ScrewModels/3.5x55.stl
+  Resources/ScrewModels/3.5x60.stl
+  Resources/ScrewModels/3.5x65.stl
+  Resources/ScrewModels/3.5x70.stl
+  Resources/ScrewModels/3.5x75.stl
+  Resources/ScrewModels/3x30.stl
+  Resources/ScrewModels/3x35.stl
+  Resources/ScrewModels/3x40.stl
+  Resources/ScrewModels/3x45.stl
+  Resources/ScrewModels/3x50.stl
+  Resources/ScrewModels/3x55.stl
+  Resources/ScrewModels/3x60.stl
+  Resources/ScrewModels/3x65.stl
+  Resources/ScrewModels/3x70.stl
+  Resources/ScrewModels/3x75.stl
+  Resources/ScrewModels/4.5x30.stl
+  Resources/ScrewModels/4.5x35.stl
+  Resources/ScrewModels/4.5x40.stl
+  Resources/ScrewModels/4.5x45.stl
+  Resources/ScrewModels/4.5x50.stl
+  Resources/ScrewModels/4.5x55.stl
+  Resources/ScrewModels/4.5x60.stl
+  Resources/ScrewModels/4.5x65.stl
+  Resources/ScrewModels/4.5x70.stl
+  Resources/ScrewModels/4.5x75.stl
+  Resources/ScrewModels/4x30.stl
+  Resources/ScrewModels/4x35.stl
+  Resources/ScrewModels/4x40.stl
+  Resources/ScrewModels/4x45.stl
+  Resources/ScrewModels/4x50.stl
+  Resources/ScrewModels/4x55.stl
+  Resources/ScrewModels/4x60.stl
+  Resources/ScrewModels/4x65.stl
+  Resources/ScrewModels/4x70.stl
+  Resources/ScrewModels/4x75.stl
   Resources/ScrewModels/screw head.vtk
   )
 

@@ -32,15 +32,21 @@ class BART_Planning(ScriptedLoadableModule):
         self.parent.title = _("BART_Planning")
         self.parent.categories = ["BART_LAB"]
         self.parent.dependencies = []
-        self.parent.contributors = ["Krittanat Tanthuvanit (BART LAB, Mahidol University)"]
+        self.parent.contributors = [
+            "Krittanat Tanthuvanit (BART LAB, Mahidol University)",
+            "Chinnagrit Junchaya (BART LAB, Mahidol University)",
+            "Phubase Netrapathompornkij (BART LAB, Mahidol University)"
+        ]
         self.parent.helpText = _("""
-This is an example of scripted loadable module bundled in an extension.
-See more information in <a href="https://github.com/organization/projectname#BART_Planning">module documentation</a>.
-""")
+    This module has been modified by BART LAB for research purposes.
+    For more details, documentation, and the latest updates, please visit:
+    <a href="https://github.com/MonoJRz/BART_Planning.git">https://github.com/MonoJRz/BART_Planning.git</a>
+    """)
         self.parent.acknowledgementText = _("""
-This file was originally developed by Jean-Christophe Fillion-Robin, Kitware Inc., Andras Lasso, PerkLab,
-and Steve Pieper, Isomics, Inc. and was partially funded by NIH grant 3P41RR013218-12S1.
-""")
+    This file was originally developed by Jean-Christophe Fillion-Robin, Kitware Inc., Andras Lasso, PerkLab,
+    and Steve Pieper, Isomics, Inc. and was partially funded by NIH grant 3P41RR013218-12S1.
+    It has been modified by BART LAB for research purposes.
+    """)
 
 # BART_PlanningWidget
 #
