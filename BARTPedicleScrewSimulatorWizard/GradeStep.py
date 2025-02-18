@@ -10,7 +10,7 @@ class GradeStep(PedicleScrewSimulatorStep):
     def __init__( self, stepid ):
       self.initialize( stepid )
       self.setName( '6. Grade' )
-      self.setDescription( 'Grading Step' )
+      self.setDescription("Evaluate screw placement quality by calculating the percentage of the screw engaged with soft tissue, cancellous bone, and cortical bone (CT Hounsfield Units). Use the 'Save 3D Model' button to export the merged model of screws and segmentations.")
       self.fiduciallist = []
       self.__corticalMin = 375
       self.__corticalMax = 1200
@@ -150,7 +150,6 @@ class GradeStep(PedicleScrewSimulatorStep):
           self.sliceChange()
           #self.updateChart(self.screwList[self.currentFid])
 
-
     def cameraFocus(self, position):
       camera = slicer.mrmlScene.GetNodeByID('vtkMRMLCameraNode1')
       camera.SetFocalPoint(*position)
@@ -262,13 +261,13 @@ class GradeStep(PedicleScrewSimulatorStep):
                 return
         self.chartContact(self.screwCount)
 
-    #Crops out head of the screw
+    # Crops out head of the screw
     def cropScrew(self,input, area):
-        #Get bounds of screw
+        # Get bounds of screw
         bounds = input.GetPolyData().GetBounds()
         logging.debug(bounds)
 
-        #Define bounds for cropping out the head or shaft of the screw respectively
+        # Define bounds for cropping out the head or shaft of the screw respectively
         if area == 'head':
             i = bounds[2]
             j = bounds[3]-15
@@ -276,31 +275,31 @@ class GradeStep(PedicleScrewSimulatorStep):
             i = bounds[3]-15
             j = bounds[3]
 
-        #Create a box with bounds equal to that of the screw minus the head (-15)
+        # Create a box with bounds equal to that of the screw minus the head (-15)
         cropBox = vtk.vtkBox()
         cropBox.SetBounds(bounds[0],bounds[1],i,j,bounds[4],bounds[5])
 
-        #Crop out head of screw
+        # Crop out head of screw
         extract = vtk.vtkExtractPolyDataGeometry()
         extract.SetImplicitFunction(cropBox)
         extract.SetInputData(input.GetPolyData())
         extract.Update()
 
-        #PolyData of cropped screw
+        # PolyData of cropped screw
         output = extract.GetOutput()
         return output
 
-    #Select all points in the shaft of the screw for grading
+    # Select all points in the shaft of the screw for grading
     def cropPoints(self, input):
-        #Get bounds of screw
+        # Get bounds of screw
         bounds = input.GetPolyData().GetBounds()
 
-        #Create a cube with bounds equal to that of the screw minus the head (-15)
+        # Create a cube with bounds equal to that of the screw minus the head (-15)
         cropCube = vtk.vtkCubeSource()
         cropCube.SetBounds(bounds[0],bounds[1],bounds[2],bounds[3]-15,bounds[4],bounds[5])
         cropCube.Update()
 
-        #Select points on screw within cube
+        # Select points on screw within cube
         select = vtk.vtkSelectEnclosedPoints()
         select.SetInputData(input.GetPolyData())
         select.SetSurfaceData(cropCube.GetOutput())
@@ -309,25 +308,25 @@ class GradeStep(PedicleScrewSimulatorStep):
         return select
 
     def gradeScrew(self, screwModel, transformFid, fidName, screwIndex):
-        #Reset screws
-        #self.clearGrade()
+        # Reset screws
+        # self.clearGrade()
 
-        #Crop out head of screw
+        # Crop out head of screw
         croppedScrew = self.cropScrew(screwModel, 'head')
 
-        #Clone screw model poly data
+        # Clone screw model poly data
         inputModel = slicer.vtkMRMLModelNode()
         inputModel.SetAndObservePolyData(croppedScrew)
         inputModel.SetAndObserveTransformNodeID(transformFid.GetID())
         slicer.mrmlScene.AddNode(inputModel)
         slicer.vtkSlicerTransformLogic.hardenTransform(inputModel)
 
-        #Create new model for output
+        # Create new model for output
         output = slicer.vtkMRMLModelNode()
         output.SetName('Grade model %s' % fidName)
         slicer.mrmlScene.AddNode(output)
 
-        #Parameters for ProbeVolumeWithModel
+        # Parameters for ProbeVolumeWithModel
         parameters = {}
         parameters["InputVolume"] = self.__inputScalarVol.GetID()
         parameters["InputModel"] = inputModel.GetID()
@@ -336,12 +335,12 @@ class GradeStep(PedicleScrewSimulatorStep):
         probe = slicer.modules.probevolumewithmodel
         slicer.cli.run(probe, None, parameters, wait_for_completion=True)
 
-        #Hide original screw
+        # Hide original screw
         modelDisplay = screwModel.GetDisplayNode()
         modelDisplay.SetColor(0,1,0)
         modelDisplay.VisibilityOff()
 
-        #Highlight screwh head
+        # Highlight screw head
         headModel = slicer.vtkMRMLModelNode()
         headModel.SetName('Head %s' % fidName)
         headModel.SetAndObservePolyData(self.cropScrew(screwModel, 'shaft'))
@@ -353,128 +352,116 @@ class GradeStep(PedicleScrewSimulatorStep):
         slicer.mrmlScene.AddNode(headDisplay)
         headModel.SetAndObserveDisplayNodeID(headDisplay.GetID())
 
-        #Remove clone
+        # Remove clone
         slicer.mrmlScene.RemoveNode(inputModel)
 
-        #Grade and chart screw
+        # Grade and chart screw
         self.contact(output, screwModel, fidName, screwIndex)
 
     def contact(self, input, screwModel, fidName, screwIndex):
-        #Get points in shaft of screw
+        # Get points in shaft of screw
         insidePoints = self.cropPoints(screwModel)
 
-        #Get scalars to array
+        # Get scalars to array
         scalarsArray = input.GetPolyData().GetPointData().GetScalars('NRRDImage')
         self.pointsArray = screwModel.GetPolyData()
 
-        #Get total number of tuples/points
-        value = scalarsArray.GetNumberOfTuples()
+        # Get total number of tuples/points
+        numTuples = scalarsArray.GetNumberOfTuples()
 
-        #Reset variables
-        bounds = [0]
-        shaftBounds = 0
+        # Reset variables
+        bounds = self.pointsArray.GetPoints().GetBounds()
+        lowerBound = bounds[2]  # starting point along Y
+        shaftBounds = 30  # FOR NOW - adjust as needed based on the screw's geometry
+        logging.debug(bounds)
+        xCenter = (bounds[0] + bounds[1]) / 2
+        zCenter = (bounds[4] + bounds[5]) / 2
+
+        # Spatial Resolution
+        numSegments = 50
+
+        # Initialize arrays to accumulate HU values along the screw
+        count = [0.0] * numSegments
+        points = [0] * numSegments
+        # Use list comprehensions to avoid issues with shallow copies
+        countQ = [[0.0 for _ in range(numSegments)] for _ in range(4)]
+        pointsQ = [[0 for _ in range(numSegments)] for _ in range(4)]
 
         corticalCount = 0
         cancellousCount = 0
         totalCount = 0
-        count = [0] * 10 # sum of values along the screw
-        points = [0] * 10 # number of points along the screw
-        countQ = [[0] * 10] * 4 # sum of values in countQ[quadrant][longitudinalSection]
-        pointsQ = [[0] * 10] * 4  # number of points in pointQ[quadrant][longitudinalSection]
 
-        xCenter = 0
-        zCenter = 0
-
-        bounds = self.pointsArray.GetPoints().GetBounds()
-        lowerBound = bounds[2] #+ 15
-        shaftBounds = 30 # FOR NOW
-        logging.debug(bounds)
-        xCenter = (bounds[0] + bounds[1])/2
-        zCenter = (bounds[4] + bounds[5])/2
-
-        #For each point in the screw model...
-        point = [0]
-        point2 = [0,0,0]
-        for i in range(0, value):
-            #If the point is in the shaft of the screw...
+        # Process each point in the screw model
+        pointHU = [0]
+        pointCoord = [0, 0, 0]
+        for i in range(numTuples):
+            # Only consider points within the screw shaft
             if insidePoints.IsInside(i) != 1:
                 continue
+
             totalCount += 1
-            #Read scalar value at point to "point" array
-            scalarsArray.GetTypedTuple(i, point)
-            #logging.debug(point)
-            self.pointsArray.GetPoints().GetPoint(i,point2)
-            #logging.debug(point2)
+            scalarsArray.GetTypedTuple(i, pointHU)
+            self.pointsArray.GetPoints().GetPoint(i, pointCoord)
 
-            longitudinalIndex = int(math.floor((point2[1]-lowerBound)/shaftBounds * 10.0))
-            if longitudinalIndex<0 or longitudinalIndex>=10:
-              continue
+            # Calculate the segment index
+            longitudinalIndex = int(math.floor((pointCoord[1] - lowerBound) / shaftBounds * numSegments))
+            if longitudinalIndex < 0 or longitudinalIndex >= numSegments:
+                continue
 
-            if point2[0] < xCenter and point2[2] >= zCenter:
+            # Determine the quadrant based on x and z coordinates relative to the center
+            if pointCoord[0] < xCenter and pointCoord[2] >= zCenter:
                 quadrantIndex = 0
-            elif point2[0] >= xCenter and point2[2] >= zCenter:
+            elif pointCoord[0] >= xCenter and pointCoord[2] >= zCenter:
                 quadrantIndex = 1
-            elif point2[0] < xCenter and point2[2] < zCenter:
+            elif pointCoord[0] < xCenter and pointCoord[2] < zCenter:
                 quadrantIndex = 2
             else:
                 quadrantIndex = 3
 
-            count[longitudinalIndex] += point[0]
+            # Accumulate HU values and count points
+            count[longitudinalIndex] += pointHU[0]
             points[longitudinalIndex] += 1
-            countQ[quadrantIndex][longitudinalIndex] += point[0]
+            countQ[quadrantIndex][longitudinalIndex] += pointHU[0]
             pointsQ[quadrantIndex][longitudinalIndex] += 1
 
-            #logging.debug(totalCount)
-            #Keep track of number of points that fall into cortical threshold and cancellous threshold respectively
-            if point[0] >= self.__corticalMin:
-              corticalCount += 1
-            elif point[0] < self.__corticalMin and point[0] >= self.__cancellousMin:
-              cancellousCount += 1
+            # Count points that meet cortical or cancellous criteria
+            if pointHU[0] >= self.__corticalMin:
+                corticalCount += 1
+            elif self.__cancellousMin <= pointHU[0] < self.__corticalMin:
+                cancellousCount += 1
 
-        #Calculate averages
-        avgQuad = [[0] * 10] * 4 # average in quadrants
-        for quadrantIndex in range(4):
-            for longitudinalIndex in range(10):
-                numSamples = pointsQ[quadrantIndex][longitudinalIndex]
-                if numSamples == 0:
-                    continue
-                avgQuad[quadrantIndex][longitudinalIndex] = float(countQ[quadrantIndex][longitudinalIndex] / numSamples)
-
-        avg = [0.0] * 10 # average along the screw
-        for longitudinalIndex in range(10):
-            if points[longitudinalIndex] > 0:
-                avg[longitudinalIndex] = count[longitudinalIndex] / points[longitudinalIndex]
+        # Calculate the average HU value for each longitudinal segment along the screw
+        avg = [0.0] * numSegments
+        for j in range(numSegments):
+            if points[j] > 0:
+                avg[j] = count[j] / points[j]
 
         self.screwContact.insert(screwIndex, avg)
-        #Calculate percentages
-        corticalPercent = float(corticalCount) / float(totalCount) *100
-        cancellousPercent = float(cancellousCount) / float(totalCount) *100
+
+        # Calculate percentages of contact types
+        corticalPercent = float(corticalCount) / float(totalCount) * 100 if totalCount else 0
+        cancellousPercent = float(cancellousCount) / float(totalCount) * 100 if totalCount else 0
         otherPercent = 100 - corticalPercent - cancellousPercent
 
-        coP = str("%.0f" % corticalPercent)
-        caP = str("%.0f" % cancellousPercent)
-        otP = str("%.0f" % otherPercent)
-
-        qtcoP = qt.QTableWidgetItem(coP)
-        qtcap = qt.QTableWidgetItem(caP)
-        qtotP = qt.QTableWidgetItem(otP)
+        # Update the table items
+        qtcoP = qt.QTableWidgetItem(str("%.0f" % corticalPercent))
+        qtcap = qt.QTableWidgetItem(str("%.0f" % cancellousPercent))
+        qtotP = qt.QTableWidgetItem(str("%.0f" % otherPercent))
 
         self.itemsqtcoP.append(qtcoP)
         self.itemsqtcaP.append(qtcap)
         self.itemsqtotP.append(qtotP)
 
-        logging.debug(screwIndex)
         self.screwTable.setItem(screwIndex, 4, qtcoP)
         self.screwTable.setItem(screwIndex, 3, qtcap)
         self.screwTable.setItem(screwIndex, 2, qtotP)
 
     def chartContact(self, screwCount):
-
         # Show this chart in the plot view
         plotWidget = slicer.app.layoutManager().plotWidget(0)
         plotViewNode = plotWidget.mrmlPlotViewNode()
 
-        # Retrieve/Create plot chart
+        # Retrieve/Create plot chart node
         plotChartNode = plotViewNode.GetPlotChartNode()
         if not plotChartNode:
             plotChartNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLPlotChartNode", "Screw - Bone Contact chart")
@@ -483,13 +470,13 @@ class GradeStep(PedicleScrewSimulatorStep):
         plotChartNode.SetXAxisTitle('Screw Percentile (Head - Tip)')
         plotChartNode.SetYAxisTitle('Average HU Contact')
 
-        # Retrieve/Create plot table
+        # Retrieve/Create plot table node
         firstPlotSeries = plotChartNode.GetNthPlotSeriesNode(0)
         plotTableNode = firstPlotSeries.GetTableNode() if firstPlotSeries else None
         if not plotTableNode:
             plotTableNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTableNode", "Screw - Bone Contact table")
 
-        # Set x, cortical bone, and cancellous bone columns
+        # Remove all existing columns and add new ones
         plotTableNode.RemoveAllColumns()
         arrX = vtk.vtkFloatArray()
         arrX.SetName("Screw Percentile")
@@ -500,28 +487,30 @@ class GradeStep(PedicleScrewSimulatorStep):
         arrCancellous = vtk.vtkFloatArray()
         arrCancellous.SetName("Cancellous Bone")
         plotTableNode.AddColumn(arrCancellous)
-        numPoints = 10
+
+        # Set the number of segments to match the increased spatial resolution
+        numSegments = 50
         plotTable = plotTableNode.GetTable()
-        plotTable.SetNumberOfRows(numPoints)
-        for i in range(numPoints):
-            plotTable.SetValue(i, 0, i * 10)
-            plotTable.SetValue(i, 1, 250)
-            plotTable.SetValue(i, 2, 130)
+        plotTable.SetNumberOfRows(numSegments)
+        for i in range(numSegments):
+            plotTable.SetValue(i, 0, i * (100.0 / numSegments))
+            plotTable.SetValue(i, 1, 375)
+            plotTable.SetValue(i, 2, 135)
 
         arrays = [arrCortical, arrCancellous]
 
+        # Add the screw contact data arrays for each screw
         for i in range(screwCount):
-            # Create an Array Node and add some data
             arrScrew = vtk.vtkFloatArray()
             arrScrew.SetName('Screw %s' % i)
-            arrScrew.SetNumberOfValues(numPoints)
+            arrScrew.SetNumberOfValues(numSegments)
             screwValues = self.screwContact[i]
-            for j in range(numPoints):
+            for j in range(numSegments):
                 arrScrew.SetValue(j, screwValues[j])
             plotTableNode.AddColumn(arrScrew)
             arrays.append(arrScrew)
 
-        # Update/Create plot series
+        # Update or create plot series nodes
         for arrIndex, arr in enumerate(arrays):
             plotSeriesNode = plotChartNode.GetNthPlotSeriesNode(arrIndex)
             if not plotSeriesNode:
@@ -533,27 +522,26 @@ class GradeStep(PedicleScrewSimulatorStep):
             plotSeriesNode.SetYColumnName(arr.GetName())
             plotSeriesNode.SetPlotType(slicer.vtkMRMLPlotSeriesNode.PlotTypeScatter)
             if arrIndex < 2:
-                # two constant lines
                 plotSeriesNode.SetLineStyle(slicer.vtkMRMLPlotSeriesNode.LineStyleDash)
             else:
                 plotSeriesNode.SetLineStyle(slicer.vtkMRMLPlotSeriesNode.LineStyleSolid)
             plotSeriesNode.SetMarkerStyle(slicer.vtkMRMLPlotSeriesNode.MarkerStyleNone)
             plotSeriesNode.SetUniqueColor()
 
-        # Remove extra series nodes
-        for i in range(plotChartNode.GetNumberOfPlotSeriesNodes() - len(arrays)):
+        # Remove any extra plot series nodes
+        while plotChartNode.GetNumberOfPlotSeriesNodes() > len(arrays):
             plotChartNode.RemoveNthPlotSeriesNodeID(plotChartNode.GetNumberOfPlotSeriesNodes() - 1)
 
     def clearGrade(self):
-        #Clear chart
+        # Clear chart
         if self.cvn:
             self.cvn.SetChartNodeID(None)
 
-        #For each fiducial, restore original screw model and remove graded screw model
+        # For each fiducial, restore original screw model and remove graded screw model
         fiducial = self.fiducialNode()
         fidCount = fiducial.GetNumberOfControlPoints()
         for i in range(fidCount):
-          fiducial.SetNthControlPointVisibility(i, False)
+          # fiducial.SetNthControlPointVisibility(i, False)
           fidName = fiducial.GetNthControlPointLabel(i)
           screwModel = slicer.mrmlScene.GetFirstNodeByName('Screw %s' % fidName)
           if screwModel != None:
@@ -568,4 +556,3 @@ class GradeStep(PedicleScrewSimulatorStep):
           headModel = slicer.mrmlScene.GetFirstNodeByName('Head %s' % fidName)
           if headModel != None:
               slicer.mrmlScene.RemoveNode(headModel)
-
