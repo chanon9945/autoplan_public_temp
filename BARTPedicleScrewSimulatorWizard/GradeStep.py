@@ -4,219 +4,210 @@ from .PedicleScrewSimulatorStep import *
 from .Helper import *
 import math
 
-# TODO Add GR Score
 class GradeStep(PedicleScrewSimulatorStep):
 
-    def __init__( self, stepid ):
-      self.initialize( stepid )
-      self.setName( '6. Grade' )
-      self.setDescription("Evaluate screw placement quality by calculating the percentage of the screw engaged with soft tissue, cancellous bone, and cortical bone (CT Hounsfield Units). Use the 'Save 3D Model' button to export the merged model of screws and segmentations.")
-      self.fiduciallist = []
-      self.__corticalMin = 375
-      self.__corticalMax = 1200
-      self.__cancellousMin = 135
-      self.__cancellousMax = 375
-      self.fiduciallist = []
-      self.itemsqtcoP = []
-      self.itemsqtcaP = []
-      self.itemsqtotP = []
-      self.pointsArray = []
-      self.screwContact = []
-      self.screwCount = 0
-      self.cvn = None
+    def __init__(self, stepid):
+        self.initialize(stepid)
+        self.setName('6. Grade')
+        self.setDescription(
+            "Evaluate screw placement quality by calculating the percentage "
+            "of the screw engaged with soft tissue, cancellous bone, and cortical "
+            "bone (CT Hounsfield Units). Use the 'Save 3D Model' button to export "
+            "the model of screws and segmentations."
+        )
 
-      self.__parent = super( GradeStep, self )
+        self.__parent = super(GradeStep, self)
+
+        # Parameter defaults
+        self.__corticalMin = 375
+        self.__corticalMax = 1200
+        self.__cancellousMin = 135
+        self.__cancellousMax = 375
+
+        # Internal bookkeeping
+        self.fiduciallist = []
+        self.itemsqtcoP = []
+        self.itemsqtcaP = []
+        self.itemsqtotP = []
+        self.pointsArray = []
+        self.screwContact = []
+        self.screwCount = 0
+        self.cvn = None
 
     def killButton(self):
-      # hide useless button
-      bl = slicer.util.findChildren(text='Final')
-      if len(bl):
-        bl[0].hide()
+        # Hide the "Final" button in the workflow
+        bl = slicer.util.findChildren(text='Final')
+        if len(bl):
+            bl[0].hide()
 
-    def createUserInterface( self ):
+    def createUserInterface(self):
+        self.__layout = self.__parent.createUserInterface()
+        ln = slicer.mrmlScene.GetFirstNodeByClass('vtkMRMLLayoutNode')
+        ln.SetViewArrangement(slicer.vtkMRMLLayoutNode.SlicerLayoutConventionalPlotView)
 
-      self.__layout = self.__parent.createUserInterface()
+        # "Grade Screws" Button
+        self.__selectScrewButton = qt.QPushButton("Grade Screws")
+        self.__selectScrewButton.setStyleSheet("background-color: green;")
+        self.__layout.addWidget(self.__selectScrewButton)
+        self.__selectScrewButton.connect('clicked(bool)', self.gradeScrews)
 
-      ln = slicer.mrmlScene.GetFirstNodeByClass('vtkMRMLLayoutNode')
-      ln.SetViewArrangement(slicer.vtkMRMLLayoutNode.SlicerLayoutConventionalPlotView)
+        # Table for screw information
+        horizontalHeaders = [
+            "Screw At",
+            "Screw\n Size",
+            "% Screw in\n LD Bone\n (135-375HU)",
+            "% Screw in\n HD Bone\n (>375HU)",
+            "GR Score"
+        ]
+        # 6 columns
+        self.screwTable = qt.QTableWidget(0, 5)
+        self.screwTable.sortingEnabled = False
+        self.screwTable.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
+        self.screwTable.horizontalHeader().setSectionResizeMode(qt.QHeaderView.Stretch)
+        self.screwTable.setSizePolicy(qt.QSizePolicy.MinimumExpanding, qt.QSizePolicy.Preferred)
+        self.screwTable.itemSelectionChanged.connect(self.onTableCellClicked)
+        self.__layout.addWidget(self.screwTable)
+        self.screwTable.setHorizontalHeaderLabels(horizontalHeaders)
 
-      # Paint Screw Button
-      self.__selectScrewButton = qt.QPushButton("Grade Screws")
-      self.__selectScrewButton.setStyleSheet("background-color: green;")
-      self.__layout.addWidget(self.__selectScrewButton)
-      self.__selectScrewButton.connect('clicked(bool)', self.gradeScrews)
-      self.fiducial = self.fiducialNode()
-      self.fidNumber = self.fiducial.GetNumberOfControlPoints()
+        # Button to save 3D models
+        self.saveModelButton = qt.QPushButton("Save 3D Model")
+        self.saveModelButton.setStyleSheet("background-color: blue;")
+        self.saveModelButton.toolTip = "Save the 3D view model into a single object."
+        self.__layout.addWidget(self.saveModelButton)
+        self.saveModelButton.clicked.connect(self.save3DModel)
 
-      # Screw Table
-      horizontalHeaders = ["Screw At","Screw\n Size","% Screw in\n Soft Tissue\n (<130HU)","% Screw in\n LD Bone\n (130-250HU)","% Screw in\n HD Bone\n (>250HU)" ]
-      self.screwTable = qt.QTableWidget(self.fidNumber, 5)
-      self.screwTable.sortingEnabled = False
-      self.screwTable.setEditTriggers(1)
-      self.screwTable.setMinimumHeight(self.screwTable.verticalHeader().length())
-      self.screwTable.horizontalHeader().setSectionResizeMode(qt.QHeaderView.Stretch)
-      self.screwTable.setSizePolicy (qt.QSizePolicy.MinimumExpanding, qt.QSizePolicy.Preferred)
-      self.screwTable.itemSelectionChanged.connect(self.onTableCellClicked)
-      self.__layout.addWidget(self.screwTable)
+        # Prepare table rows
+        self.fiducial = self.fiducialNode()
+        self.fidNumber = self.fiducial.GetNumberOfControlPoints()
+        self.screwTable.setRowCount(self.fidNumber)
 
-      self.screwTable.setHorizontalHeaderLabels(horizontalHeaders)
-
-      # Add a button to save the 3D model as a single object
-      self.saveModelButton = qt.QPushButton("Save 3D Model")
-      self.saveModelButton.setStyleSheet("background-color: blue;")
-      self.saveModelButton.toolTip = "Save the 3D view model into a single object."
-      self.__layout.addWidget(self.saveModelButton)
-
-      # Connect the button to the save function
-      self.saveModelButton.clicked.connect(self.save3DModel)
-
-      qt.QTimer.singleShot(0, self.killButton)
-
-      self.updateTable()
+        qt.QTimer.singleShot(0, self.killButton)
+        self.updateTable()
 
     def save3DModel(self):
-      # Prompt user to select output folder
-      folder = qt.QFileDialog.getExistingDirectory(None, "Select Folder to Save Screws and Segmentations")
-      if not folder:
-          qt.QMessageBox.warning(None, "No Folder Selected", "No folder selected. Cannot save.")
-          return
+        folder = qt.QFileDialog.getExistingDirectory(None, "Select Folder to Save Screws and Segmentations")
+        if not folder:
+            qt.QMessageBox.warning(None, "No Folder Selected", "No folder selected. Cannot save.")
+            return
 
-      # Create a new subfolder in the selected folder
-      newFolderName = "Saved3DModels"
-      newFolderPath = os.path.join(folder, newFolderName)
-      if not os.path.exists(newFolderPath):
-          os.makedirs(newFolderPath)
-          print(f"Created new folder: {newFolderPath}")
-      else:
-          print(f"Using existing folder: {newFolderPath}")
+        newFolderName = "Saved3DModels"
+        newFolderPath = os.path.join(folder, newFolderName)
+        if not os.path.exists(newFolderPath):
+            os.makedirs(newFolderPath)
+            print(f"Created new folder: {newFolderPath}")
+        else:
+            print(f"Using existing folder: {newFolderPath}")
 
-      # Save visible screws
-      screwNodes = [
-          node for node in slicer.util.getNodesByClass("vtkMRMLModelNode")
-          if node.GetDisplayVisibility() and node.GetName().startswith("Screw")
-      ]
-      if not screwNodes:
-          qt.QMessageBox.warning(None, "No Screws Found", "No visible screws found.")
-      else:
-          for node in screwNodes:
-              if node.GetParentTransformNode():
-                  node.HardenTransform()
-              savePath = os.path.join(newFolderPath, f"{node.GetName()}.obj")
-              slicer.util.saveNode(node, savePath)
-              print(f"Saved screw '{node.GetName()}' to {savePath}")
+        # Save visible screws
+        screwNodes = [
+            node for node in slicer.util.getNodesByClass("vtkMRMLModelNode")
+            if node.GetDisplayVisibility() and node.GetName().startswith("Screw")
+        ]
+        if not screwNodes:
+            qt.QMessageBox.warning(None, "No Screws Found", "No visible screws found.")
+        else:
+            for node in screwNodes:
+                if node.GetParentTransformNode():
+                    node.HardenTransform()
+                savePath = os.path.join(newFolderPath, f"{node.GetName()}.obj")
+                slicer.util.saveNode(node, savePath)
+                print(f"Saved screw '{node.GetName()}' to {savePath}")
 
-      # Merge and save visible segmentations
-      segNodes = [
-          node for node in slicer.util.getNodesByClass("vtkMRMLSegmentationNode")
-          if node.GetDisplayVisibility()
-      ]
-      if not segNodes:
-          qt.QMessageBox.warning(None, "No Segmentations Found", "No visible segmentations found.")
-          return
+        # Merge and save visible segmentations
+        segNodes = [
+            node for node in slicer.util.getNodesByClass("vtkMRMLSegmentationNode")
+            if node.GetDisplayVisibility()
+        ]
+        if not segNodes:
+            qt.QMessageBox.warning(None, "No Segmentations Found", "No visible segmentations found.")
+            return
 
-      # Append polydata from all visible segmentations
-      appendFilter = vtk.vtkAppendPolyData()
-      for segNode in segNodes:
-          segmentation = segNode.GetSegmentation()
-          for i in range(segmentation.GetNumberOfSegments()):
-              segId = segmentation.GetNthSegmentID(i)
-              segmentPolyData = vtk.vtkPolyData()
-              segNode.GetClosedSurfaceRepresentation(segId, segmentPolyData)
-              appendFilter.AddInputData(segmentPolyData)
-      appendFilter.Update()
+        appendFilter = vtk.vtkAppendPolyData()
+        for segNode in segNodes:
+            segmentation = segNode.GetSegmentation()
+            for i in range(segmentation.GetNumberOfSegments()):
+                segId = segmentation.GetNthSegmentID(i)
+                segmentPolyData = vtk.vtkPolyData()
+                segNode.GetClosedSurfaceRepresentation(segId, segmentPolyData)
+                appendFilter.AddInputData(segmentPolyData)
+        appendFilter.Update()
 
-      # Create a single merged model node
-      mergedNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "MergedSegmentations")
-      mergedNode.SetAndObservePolyData(appendFilter.GetOutput())
+        # Create a merged model node
+        mergedNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "MergedSegmentations")
+        mergedNode.SetAndObservePolyData(appendFilter.GetOutput())
 
-      # Save merged model
-      mergedFilePath = os.path.join(newFolderPath, "MergedSegmentation.obj")
-      slicer.util.saveNode(mergedNode, mergedFilePath)
+        mergedFilePath = os.path.join(newFolderPath, "MergedSegmentation.obj")
+        slicer.util.saveNode(mergedNode, mergedFilePath)
 
-      qt.QMessageBox.information(
-          None,
-          "Saved Successfully",
-          f"Screws and merged segmentations saved to:\n{newFolderPath}"
-      )
+        qt.QMessageBox.information(
+            None,
+            "Saved Successfully",
+            f"Screws and merged segmentations saved to:\n{newFolderPath}"
+        )
 
     def onTableCellClicked(self):
-      if self.screwTable.currentColumn() == 0:
-          logging.debug(self.screwTable.currentRow())
-          self.currentFid = self.screwTable.currentRow()
-          position = [0,0,0]
-          self.fiducial = self.fiducialNode()
-          self.fiducial.GetNthControlPointPosition(self.currentFid,position)
-          self.cameraFocus(position)
-          self.sliceChange()
-          #self.updateChart(self.screwList[self.currentFid])
+        if self.screwTable.currentColumn() == 0:
+            self.currentFid = self.screwTable.currentRow()
+            position = [0, 0, 0]
+            self.fiducial = self.fiducialNode()
+            self.fiducial.GetNthControlPointPosition(self.currentFid, position)
+            self.cameraFocus(position)
+            self.sliceChange()
 
     def cameraFocus(self, position):
-      camera = slicer.mrmlScene.GetNodeByID('vtkMRMLCameraNode1')
-      camera.SetFocalPoint(*position)
-      camera.SetPosition(position[0],position[1],75)
-      camera.SetViewUp([0,1,0])
-      camera.ResetClippingRange()
+        camera = slicer.mrmlScene.GetNodeByID('vtkMRMLCameraNode1')
+        camera.SetFocalPoint(*position)
+        camera.SetPosition(position[0], position[1], 75)
+        camera.SetViewUp([0,1,0])
+        camera.ResetClippingRange()
 
     def updateTable(self):
-      self.itemsLoc = []
-      self.itemsLen = []
-      self.itemsDia = []
+        self.itemsLoc = []
+        self.itemsLen = []
 
-      self.screwList = slicer.modules.BART_PlanningWidget.screwStep.screwList
-      self.screwNumber = len(self.screwList)
-      self.screwTable.setRowCount(self.screwNumber)
+        # Populate rows based on your screwList
+        self.screwList = slicer.modules.BART_PlanningWidget.screwStep.screwList
+        self.screwNumber = len(self.screwList)
+        self.screwTable.setRowCount(self.screwNumber)
 
-      for i in range(self.screwNumber):
-          currentScrew = self.screwList[i]
-          screwLoc = str(currentScrew[0])
-          screwLen = str(currentScrew[1]) + " x " + str(currentScrew[2])
+        for i in range(self.screwNumber):
+            currentScrew = self.screwList[i]
+            screwLoc = str(currentScrew[0])
+            screwLen = str(currentScrew[1]) + " x " + str(currentScrew[2])
 
-          qtscrewLoc = qt.QTableWidgetItem(screwLoc)
-          qtscrewLen = qt.QTableWidgetItem(screwLen)
-          #qtscrewDia = qt.QTableWidgetItem(screwDia)
+            qtscrewLoc = qt.QTableWidgetItem(screwLoc)
+            qtscrewLen = qt.QTableWidgetItem(screwLen)
 
-          self.itemsLoc.append(qtscrewLoc)
-          self.itemsLen.append(qtscrewLen)
-          #self.itemsDia.append(qtscrewDia)
+            self.itemsLoc.append(qtscrewLoc)
+            self.itemsLen.append(qtscrewLen)
 
-          self.screwTable.setItem(i, 0, qtscrewLoc)
-          self.screwTable.setItem(i, 1, qtscrewLen)
-          #self.screwTable.setItem(i, 2, qtscrewDia)
+            self.screwTable.setItem(i, 0, qtscrewLoc)
+            self.screwTable.setItem(i, 1, qtscrewLen)
 
-    def validate( self, desiredBranchId ):
-      '''
-      '''
-      self.__parent.validate( desiredBranchId )
-      self.__parent.validationSucceeded(desiredBranchId)
+    def validate(self, desiredBranchId):
+        self.__parent.validate(desiredBranchId)
+        self.__parent.validationSucceeded(desiredBranchId)
 
     def onEntry(self, comingFrom, transitionType):
+        super(GradeStep, self).onEntry(comingFrom, transitionType)
+        ln = slicer.mrmlScene.GetFirstNodeByClass('vtkMRMLLayoutNode')
+        ln.SetViewArrangement(slicer.vtkMRMLLayoutNode.SlicerLayoutConventionalPlotView)
 
-      super(GradeStep, self).onEntry(comingFrom, transitionType)
+        self.fiduciallist = []
+        self.fidNode = self.fiducialNode()
+        for x in range(self.fidNode.GetNumberOfControlPoints()):
+            label = self.fidNode.GetNthControlPointLabel(x)
+            level = slicer.modules.BART_PlanningWidget.landmarksStep.table2.cellWidget(x, 1).currentText
+            side = slicer.modules.BART_PlanningWidget.landmarksStep.table2.cellWidget(x, 2).currentText
+            self.fiduciallist.append(label + " - " + level + " - " + side)
 
-      ln = slicer.mrmlScene.GetFirstNodeByClass('vtkMRMLLayoutNode')
-      ln.SetViewArrangement(slicer.vtkMRMLLayoutNode.SlicerLayoutConventionalPlotView)
-
-      pNode = self.parameterNode()
-
-      self.fiduciallist = []
-      self.fidNode = self.fiducialNode()
-      for x in range (0,self.fidNode.GetNumberOfControlPoints()):
-        label = self.fidNode.GetNthControlPointLabel(x)
-        level = slicer.modules.BART_PlanningWidget.landmarksStep.table2.cellWidget(x,1).currentText
-        side = slicer.modules.BART_PlanningWidget.landmarksStep.table2.cellWidget(x,2).currentText
-        self.fiduciallist.append(label + " - " + level + " - " + side)
-
-      logging.debug(self.fiduciallist)
-      self.updateTable()
-
-      qt.QTimer.singleShot(0, self.killButton)
+        self.updateTable()
+        qt.QTimer.singleShot(0, self.killButton)
 
     def onExit(self, goingTo, transitionType):
-
-      if goingTo.id() == 'Screw':
-          self.clearGrade()
-
-      super(GradeStep, self).onExit(goingTo, transitionType)
+        if goingTo.id() == 'Screw':
+            self.clearGrade()
+        super(GradeStep, self).onExit(goingTo, transitionType)
 
     def updateWidgetFromParameters(self, pNode):
         pass
@@ -225,18 +216,13 @@ class GradeStep(PedicleScrewSimulatorStep):
         logging.debug('Done')
 
     def sliceChange(self):
-        coords = [0,0,0]
-        self.fiducial.GetNthControlPointPosition(self.currentFid,coords)
+        coords = [0, 0, 0]
+        self.fiducial.GetNthControlPointPosition(self.currentFid, coords)
 
         lm = slicer.app.layoutManager()
-        redWidget = lm.sliceWidget('Red')
-        redController = redWidget.sliceController()
-
-        yellowWidget = lm.sliceWidget('Yellow')
-        yellowController = yellowWidget.sliceController()
-
-        greenWidget = lm.sliceWidget('Green')
-        greenController = greenWidget.sliceController()
+        redController = lm.sliceWidget('Red').sliceController()
+        yellowController = lm.sliceWidget('Yellow').sliceController()
+        greenController = lm.sliceWidget('Green').sliceController()
 
         yellowController.setSliceOffsetValue(coords[0])
         greenController.setSliceOffsetValue(coords[1])
@@ -244,265 +230,423 @@ class GradeStep(PedicleScrewSimulatorStep):
 
     def gradeScrews(self):
         pNode = self.parameterNode()
-
         self.__inputScalarVol = pNode.GetNodeReference('baselineVolume')
-        for screwIndex in range(0, len(self.fiduciallist)):
+
+        self.screwCount = 0
+        for screwIndex in range(len(self.fiduciallist)):
             fidName = self.fiduciallist[screwIndex]
-            logging.debug(fidName)
             transformFid = slicer.mrmlScene.GetFirstNodeByName('Transform %s' % fidName)
             screwModel = slicer.mrmlScene.GetFirstNodeByName('Screw %s' % fidName)
-            if screwModel != None:
+
+            if screwModel is not None:
                 self.gradeScrew(screwModel, transformFid, fidName, screwIndex)
                 self.screwCount += 1
-                logging.debug("yes")
             else:
-                #self.clearGrade()
-                logging.debug("no")
-                return
+                logging.debug(f"No screw found for {fidName}, skipping.")
+
         self.chartContact(self.screwCount)
 
-    # Crops out head of the screw
-    def cropScrew(self,input, area):
-        # Get bounds of screw
-        bounds = input.GetPolyData().GetBounds()
-        logging.debug(bounds)
+    def cropScrew(self, inputModelNode, area):
+        """
+        Utility to isolate the 'head' (cylindrical crop) or 'shaft' (box crop) portion of the screw,
+        and optionally display the bounding cylinder/box in the 3D scene.
+        """
+        bounds = inputModelNode.GetPolyData().GetBounds()
 
-        # Define bounds for cropping out the head or shaft of the screw respectively
         if area == 'head':
-            i = bounds[2]
-            j = bounds[3]-15
+            # Define vertical bounds for the head.
+            yMin = bounds[2]
+            yMax = bounds[3] - 20
+
+            # Create a cylinder oriented along the y-axis (used as an ImplicitFunction).
+            cylinder = vtk.vtkCylinder()
+            cylinder.SetAxis(0, 1, 0)
+
+            # Center the cylinder in the X-Z plane.
+            centerX = (bounds[0] + bounds[1]) / 2.0
+            centerZ = (bounds[4] + bounds[5]) / 2.0
+            cylinder.SetCenter(centerX, 0, centerZ)
+
+            # Use the larger of half the X or Z extents as the radius.
+            radiusX = (bounds[1] - bounds[0]) / 2.0
+            radiusZ = (bounds[5] - bounds[4]) / 2.0
+            cylinder.SetRadius(max(radiusX, radiusZ))
+
+            # Create two planes to cap the cylinder along the y-axis.
+            lowerPlane = vtk.vtkPlane()
+            lowerPlane.SetOrigin(0, yMin, 0)
+            lowerPlane.SetNormal(0, -1, 0)  # inside: y >= yMin
+
+            upperPlane = vtk.vtkPlane()
+            upperPlane.SetOrigin(0, yMax, 0)
+            upperPlane.SetNormal(0, 1, 0)  # inside: y <= yMax
+
+            # Combine the cylinder and planes via an intersection.
+            clipFunction = vtk.vtkImplicitBoolean()
+            clipFunction.SetOperationTypeToIntersection()
+            clipFunction.AddFunction(cylinder)
+            clipFunction.AddFunction(lowerPlane)
+            clipFunction.AddFunction(upperPlane)
+
+            extract = vtk.vtkExtractPolyDataGeometry()
+            extract.SetImplicitFunction(clipFunction)
+            extract.SetInputData(inputModelNode.GetPolyData())
+            extract.Update()
+            croppedPolyData = extract.GetOutput()
+
+            return croppedPolyData
+
         elif area == 'shaft':
-            i = bounds[3]-15
-            j = bounds[3]
+            # Define vertical bounds for the shaft.
+            yMin = bounds[3] - 20
+            yMax = bounds[3]
 
-        # Create a box with bounds equal to that of the screw minus the head (-15)
-        cropBox = vtk.vtkBox()
-        cropBox.SetBounds(bounds[0],bounds[1],i,j,bounds[4],bounds[5])
+            # Create a box (vtkBox) crop for the shaft.
+            cropBox = vtk.vtkBox()
+            cropBox.SetBounds(bounds[0], bounds[1], yMin, yMax, bounds[4], bounds[5])
 
-        # Crop out head of screw
-        extract = vtk.vtkExtractPolyDataGeometry()
-        extract.SetImplicitFunction(cropBox)
-        extract.SetInputData(input.GetPolyData())
-        extract.Update()
+            extract = vtk.vtkExtractPolyDataGeometry()
+            extract.SetImplicitFunction(cropBox)
+            extract.SetInputData(inputModelNode.GetPolyData())
+            extract.Update()
+            croppedPolyData = extract.GetOutput()
 
-        # PolyData of cropped screw
-        output = extract.GetOutput()
-        return output
+            return croppedPolyData
 
-    # Select all points in the shaft of the screw for grading
-    def cropPoints(self, input):
-        # Get bounds of screw
-        bounds = input.GetPolyData().GetBounds()
+        else:
+            raise ValueError(f"Unknown area specified: {area}. Valid options are 'head' or 'shaft'.")
 
-        # Create a cube with bounds equal to that of the screw minus the head (-15)
-        cropCube = vtk.vtkCubeSource()
-        cropCube.SetBounds(bounds[0],bounds[1],bounds[2],bounds[3]-15,bounds[4],bounds[5])
-        cropCube.Update()
+    def computeShaftCoverageStatus(self, screwModelNode, segmentationNode):
+        """
+        Returns one of:
+          "All"   if entire shaft is inside segmentation
+          "Yes"   if partially inside
+          "No"    if no points are inside
+          "None"  if seg node is missing or empty
+        """
+        if not segmentationNode:
+            return "None"
 
-        # Select points on screw within cube
+        # Get shaft-only polydata
+        shaftPolyData = self.cropScrew(screwModelNode, 'head')
+        if (not shaftPolyData) or (shaftPolyData.GetNumberOfPoints() == 0):
+            return "No"
+
+        # Create a temp model to hold the shaft geometry
+        shaftModelNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "TempShaft")
+        shaftModelNode.SetAndObservePolyData(shaftPolyData)
+
+        # Harden transform if needed
+        if screwModelNode.GetParentTransformNode():
+            shaftModelNode.SetAndObserveTransformNodeID(screwModelNode.GetParentTransformNode().GetID())
+            slicer.vtkSlicerTransformLogic().hardenTransform(shaftModelNode)
+
+        # Export segmentation to labelmap
+        labelmapNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "TempLabel")
+        slicer.modules.segmentations.logic().ExportAllSegmentsToLabelmapNode(segmentationNode, labelmapNode)
+
+        # Create output model node for ProbeVolumeWithModel
+        outputModelNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "TempProbeOutput")
+
+        # Run CLI
+        parameters = {
+            "InputVolume": labelmapNode.GetID(),
+            "InputModel": shaftModelNode.GetID(),
+            "OutputModel": outputModelNode.GetID(),
+        }
+        slicer.cli.runSync(slicer.modules.probevolumewithmodel, None, parameters)
+
+        coverageStatus = "No"
+        polyData = outputModelNode.GetPolyData()
+        if polyData and (polyData.GetNumberOfPoints() > 0):
+            labelArray = polyData.GetPointData().GetScalars("NRRDImage")
+            if labelArray:
+                numPoints = polyData.GetNumberOfPoints()
+                insideCount = 0
+                for i in range(numPoints):
+                    if labelArray.GetTuple1(i) > 0:
+                        insideCount += 1
+
+                if insideCount == 0:
+                    coverageStatus = "No"
+                elif insideCount == numPoints:
+                    coverageStatus = "A"
+                else:
+                    coverageStatus = "<A"
+
+        # Clean up
+        slicer.mrmlScene.RemoveNode(shaftModelNode)
+        slicer.mrmlScene.RemoveNode(labelmapNode)
+        slicer.mrmlScene.RemoveNode(outputModelNode)
+
+        return coverageStatus
+
+    def cropPoints(self, screwModelNode, showCylinder=True, headLength=15.1):
+
+        # Get the full bounding box
+        fullBounds = screwModelNode.GetPolyData().GetBounds()
+
+        # Clip off the top "headLength" mm in Y.
+        yClip = fullBounds[3] - headLength
+        if yClip < fullBounds[2]:
+            yClip = fullBounds[2]
+
+        # Create a plane for y <= yClip
+        plane = vtk.vtkPlane()
+        plane.SetOrigin(0, yClip, 0)
+        plane.SetNormal(0, 1, 0)  # inside is y <= yClip
+
+        clipFilter = vtk.vtkExtractPolyDataGeometry()
+        clipFilter.SetImplicitFunction(plane)
+        clipFilter.SetInputData(screwModelNode.GetPolyData())
+        clipFilter.Update()
+
+        shaftPolyData = clipFilter.GetOutput()
+        if not shaftPolyData or shaftPolyData.GetNumberOfPoints() == 0:
+            # If there's nothing after clipping, return a dummy filter
+            select = vtk.vtkSelectEnclosedPoints()
+            select.SetInputData(screwModelNode.GetPolyData())  # or empty
+            emptyPoly = vtk.vtkPolyData()  # empty surface
+            select.SetSurfaceData(emptyPoly)
+            select.Update()
+            return select
+
+        # Compute bounding box *only* for the clipped region
+        shaftBounds = shaftPolyData.GetBounds()
+        # shaftBounds = (xMin, xMax, yMin, yMax, zMin, zMax)
+
+        # Create a cylinder using those narrower shaft bounds
+        shaftHeight = shaftBounds[3] - shaftBounds[2]
+        centerX = (shaftBounds[0] + shaftBounds[1]) / 2.0
+        centerY = (shaftBounds[2] + shaftBounds[3]) / 2.0
+        centerZ = (shaftBounds[4] + shaftBounds[5]) / 2.0
+
+        # Radius from the narrower bounding box
+        radiusX = (shaftBounds[1] - shaftBounds[0]) / 2.0
+        radiusZ = (shaftBounds[5] - shaftBounds[4]) / 2.0
+        shaftRadius = max(radiusX, radiusZ)
+
+        cylinder = vtk.vtkCylinderSource()
+        cylinder.SetResolution(50)  # smoother cylinder
+        cylinder.SetHeight(shaftHeight)
+        cylinder.SetRadius(shaftRadius)
+        cylinder.CappingOn()
+        cylinder.Update()
+
+        # Rotate cylinder so its axis aligns with Y
+        rotateTransform = vtk.vtkTransform()
+        rotateFilter = vtk.vtkTransformPolyDataFilter()
+        rotateFilter.SetTransform(rotateTransform)
+        rotateFilter.SetInputConnection(cylinder.GetOutputPort())
+        rotateFilter.Update()
+
+        # Translate cylinder to the shaft center
+        translateTransform = vtk.vtkTransform()
+        translateTransform.Translate(centerX, centerY, centerZ)
+        translateFilter = vtk.vtkTransformPolyDataFilter()
+        translateFilter.SetTransform(translateTransform)
+        translateFilter.SetInputConnection(rotateFilter.GetOutputPort())
+        translateFilter.Update()
+
+        finalCylinderPolyData = translateFilter.GetOutput()
+
+        # Optionally visualize the cylinder
+        if showCylinder:
+            cylinderModelName = f"Cylinder_{screwModelNode.GetName()}"
+            cylinderModelNode = slicer.mrmlScene.AddNewNodeByClass(
+                "vtkMRMLModelNode", cylinderModelName
+            )
+            cylinderModelNode.SetAndObservePolyData(finalCylinderPolyData)
+
+            cylinderDisplayNode = slicer.mrmlScene.AddNewNodeByClass(
+                "vtkMRMLModelDisplayNode"
+            )
+            cylinderDisplayNode.SetColor(1, 0, 0)  # red
+            cylinderDisplayNode.SetOpacity(0.3)  # semi-transparent
+            cylinderModelNode.SetAndObserveDisplayNodeID(cylinderDisplayNode.GetID())
+
+            # Apply the same parent transform (if any) so it moves with the screw
+            parentTransform = screwModelNode.GetParentTransformNode()
+            if parentTransform:
+                cylinderModelNode.SetAndObserveTransformNodeID(parentTransform.GetID())
+
         select = vtk.vtkSelectEnclosedPoints()
-        select.SetInputData(input.GetPolyData())
-        select.SetSurfaceData(cropCube.GetOutput())
+        select.SetInputData(screwModelNode.GetPolyData())
+        select.SetSurfaceData(finalCylinderPolyData)
         select.Update()
 
         return select
 
     def gradeScrew(self, screwModel, transformFid, fidName, screwIndex):
-        # Reset screws
-        # self.clearGrade()
-
-        # Crop out head of screw
+        # Crop out head
         croppedScrew = self.cropScrew(screwModel, 'head')
 
-        # Clone screw model poly data
-        inputModel = slicer.vtkMRMLModelNode()
+        # Create an input model node for ProbeVolumeWithModel
+        inputModel = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "TempInputModel")
         inputModel.SetAndObservePolyData(croppedScrew)
         inputModel.SetAndObserveTransformNodeID(transformFid.GetID())
-        slicer.mrmlScene.AddNode(inputModel)
-        slicer.vtkSlicerTransformLogic.hardenTransform(inputModel)
 
-        # Create new model for output
-        output = slicer.vtkMRMLModelNode()
-        output.SetName('Grade model %s' % fidName)
-        slicer.mrmlScene.AddNode(output)
+        # Harden the transform so the geometry
+        slicer.vtkSlicerTransformLogic().hardenTransform(inputModel)
 
-        # Parameters for ProbeVolumeWithModel
-        parameters = {}
-        parameters["InputVolume"] = self.__inputScalarVol.GetID()
-        parameters["InputModel"] = inputModel.GetID()
-        parameters["OutputModel"] = output.GetID()
+        # Create an output model node for the probed result
+        output = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", f"Grade model {fidName}")
 
-        probe = slicer.modules.probevolumewithmodel
-        slicer.cli.run(probe, None, parameters, wait_for_completion=True)
+        # Run ProbeVolumeWithModel
+        parameters = {
+            "InputVolume": self.__inputScalarVol.GetID(),
+            "InputModel": inputModel.GetID(),
+            "OutputModel": output.GetID(),
+        }
+        slicer.cli.runSync(slicer.modules.probevolumewithmodel, None, parameters)
 
-        # Hide original screw
-        modelDisplay = screwModel.GetDisplayNode()
-        modelDisplay.SetColor(0,1,0)
-        modelDisplay.VisibilityOff()
+        # Hide the original screw
+        if screwModel.GetDisplayNode():
+            screwModel.GetDisplayNode().SetColor(0,1,0)
+            screwModel.GetDisplayNode().VisibilityOff()
 
-        # Highlight screw head
-        headModel = slicer.vtkMRMLModelNode()
-        headModel.SetName('Head %s' % fidName)
-        headModel.SetAndObservePolyData(self.cropScrew(screwModel, 'shaft'))
+        # Show the head portion as a new model node
+        headPolyData = self.cropScrew(screwModel, 'shaft')
+        headModel = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", f"Head {fidName}")
+        headModel.SetAndObservePolyData(headPolyData)
         headModel.SetAndObserveTransformNodeID(transformFid.GetID())
-        slicer.mrmlScene.AddNode(headModel)
 
-        headDisplay = slicer.vtkMRMLModelDisplayNode()
+        # Make a new display node for the head portion
+        headDisplay = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelDisplayNode")
         headDisplay.SetColor(0,1,0)
-        slicer.mrmlScene.AddNode(headDisplay)
         headModel.SetAndObserveDisplayNodeID(headDisplay.GetID())
 
-        # Remove clone
+        # Coverage status in the segmentation
+        segNode = slicer.mrmlScene.GetFirstNodeByName("Segmentation")
+        coverageStatus = self.computeShaftCoverageStatus(screwModel, segNode)
+        coverageItem = qt.QTableWidgetItem(coverageStatus)
+        self.screwTable.setItem(screwIndex, 4, coverageItem)
+
+        # Remove the temporary input model
         slicer.mrmlScene.RemoveNode(inputModel)
 
-        # Grade and chart screw
+        # Compute HU-based contact
         self.contact(output, screwModel, fidName, screwIndex)
 
-    def contact(self, input, screwModel, fidName, screwIndex):
-        # Get points in shaft of screw
-        insidePoints = self.cropPoints(screwModel)
+    def contact(self, outputModel, screwModel, fidName, screwIndex):
+        """
+        Classify points in the shaft region by HU ranges:
+         - Cancellous: < corticalMin
+         - Cortical: >= corticalMin
+        Then put the percentages in the table columns 2-3.
+        """
+        insidePoints = self.cropPoints(screwModel, showCylinder=True)
+        polyData = outputModel.GetPolyData()
+        scalarsArray = polyData.GetPointData().GetScalars('NRRDImage') if polyData else None
+        if not scalarsArray:
+            self.screwTable.setItem(screwIndex, 2, qt.QTableWidgetItem("0"))
+            self.screwTable.setItem(screwIndex, 3, qt.QTableWidgetItem("0"))
+            return
 
-        # Get scalars to array
-        scalarsArray = input.GetPolyData().GetPointData().GetScalars('NRRDImage')
-        self.pointsArray = screwModel.GetPolyData()
-
-        # Get total number of tuples/points
         numTuples = scalarsArray.GetNumberOfTuples()
+        pointsArray = screwModel.GetPolyData()
 
-        # Reset variables
-        bounds = self.pointsArray.GetPoints().GetBounds()
-        lowerBound = bounds[2]  # starting point along Y
-        shaftBounds = 30  # FOR NOW - adjust as needed based on the screw's geometry
-        logging.debug(bounds)
-        xCenter = (bounds[0] + bounds[1]) / 2
-        zCenter = (bounds[4] + bounds[5]) / 2
+        bounds = pointsArray.GetPoints().GetBounds()
+        lowerBound = bounds[2]
 
-        # Spatial Resolution
+        screwSize = self.screwList[screwIndex]
+        screwLength = float(screwSize[2])
+        shaftBounds = screwLength
+
         numSegments = 50
-
-        # Initialize arrays to accumulate HU values along the screw
         count = [0.0] * numSegments
-        points = [0] * numSegments
-        # Use list comprehensions to avoid issues with shallow copies
-        countQ = [[0.0 for _ in range(numSegments)] for _ in range(4)]
-        pointsQ = [[0 for _ in range(numSegments)] for _ in range(4)]
+        nPoints = [0] * numSegments
 
         corticalCount = 0
-        cancellousCount = 0
         totalCount = 0
 
-        # Process each point in the screw model
-        pointHU = [0]
-        pointCoord = [0, 0, 0]
+        # Iterate over each point in the probed geometry
+        tmpHU = [0]
+        coord = [0, 0, 0]
         for i in range(numTuples):
-            # Only consider points within the screw shaft
+            # Only consider points in the "shaft"
             if insidePoints.IsInside(i) != 1:
                 continue
 
             totalCount += 1
-            scalarsArray.GetTypedTuple(i, pointHU)
-            self.pointsArray.GetPoints().GetPoint(i, pointCoord)
+            scalarsArray.GetTypedTuple(i, tmpHU)
+            pointsArray.GetPoints().GetPoint(i, coord)
 
-            # Calculate the segment index
-            longitudinalIndex = int(math.floor((pointCoord[1] - lowerBound) / shaftBounds * numSegments))
-            if longitudinalIndex < 0 or longitudinalIndex >= numSegments:
-                continue
+            longIndex = int(math.floor((coord[1] - lowerBound) / shaftBounds * numSegments))
+            if 0 <= longIndex < numSegments:
+                count[longIndex] += tmpHU[0]
+                nPoints[longIndex] += 1
 
-            # Determine the quadrant based on x and z coordinates relative to the center
-            if pointCoord[0] < xCenter and pointCoord[2] >= zCenter:
-                quadrantIndex = 0
-            elif pointCoord[0] >= xCenter and pointCoord[2] >= zCenter:
-                quadrantIndex = 1
-            elif pointCoord[0] < xCenter and pointCoord[2] < zCenter:
-                quadrantIndex = 2
-            else:
-                quadrantIndex = 3
-
-            # Accumulate HU values and count points
-            count[longitudinalIndex] += pointHU[0]
-            points[longitudinalIndex] += 1
-            countQ[quadrantIndex][longitudinalIndex] += pointHU[0]
-            pointsQ[quadrantIndex][longitudinalIndex] += 1
-
-            # Count points that meet cortical or cancellous criteria
-            if pointHU[0] >= self.__corticalMin:
+            if tmpHU[0] >= self.__corticalMin:
                 corticalCount += 1
-            elif self.__cancellousMin <= pointHU[0] < self.__corticalMin:
-                cancellousCount += 1
 
-        # Calculate the average HU value for each longitudinal segment along the screw
-        avg = [0.0] * numSegments
+        # Compute average HU along the shaft (for charting)
+        avgHUalongShaft = [0.0]*numSegments
         for j in range(numSegments):
-            if points[j] > 0:
-                avg[j] = count[j] / points[j]
+            if nPoints[j] > 0:
+                avgHUalongShaft[j] = count[j] / nPoints[j]
 
-        self.screwContact.insert(screwIndex, avg)
+        # Keep for chart display
+        self.screwContact.insert(screwIndex, avgHUalongShaft)
 
-        # Calculate percentages of contact types
-        corticalPercent = float(corticalCount) / float(totalCount) * 100 if totalCount else 0
-        cancellousPercent = float(cancellousCount) / float(totalCount) * 100 if totalCount else 0
-        otherPercent = 100 - corticalPercent - cancellousPercent
+        # Percentages
+        corticalPercent = 0.0
+        if totalCount > 0:
+            corticalPercent = 100.0 * corticalCount / totalCount
+            cancellousPercent = 100.0 - corticalPercent
 
-        # Update the table items
-        qtcoP = qt.QTableWidgetItem(str("%.0f" % corticalPercent))
-        qtcap = qt.QTableWidgetItem(str("%.0f" % cancellousPercent))
-        qtotP = qt.QTableWidgetItem(str("%.0f" % otherPercent))
+        # Place them in columns
+        ldItem = qt.QTableWidgetItem(str(int(round(cancellousPercent))))
+        hdItem = qt.QTableWidgetItem(str(int(round(corticalPercent))))
 
-        self.itemsqtcoP.append(qtcoP)
-        self.itemsqtcaP.append(qtcap)
-        self.itemsqtotP.append(qtotP)
-
-        self.screwTable.setItem(screwIndex, 4, qtcoP)
-        self.screwTable.setItem(screwIndex, 3, qtcap)
-        self.screwTable.setItem(screwIndex, 2, qtotP)
+        self.screwTable.setItem(screwIndex, 2, ldItem)
+        self.screwTable.setItem(screwIndex, 3, hdItem)
 
     def chartContact(self, screwCount):
-        # Show this chart in the plot view
         plotWidget = slicer.app.layoutManager().plotWidget(0)
         plotViewNode = plotWidget.mrmlPlotViewNode()
 
-        # Retrieve/Create plot chart node
         plotChartNode = plotViewNode.GetPlotChartNode()
         if not plotChartNode:
             plotChartNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLPlotChartNode", "Screw - Bone Contact chart")
             plotViewNode.SetPlotChartNodeID(plotChartNode.GetID())
+
         plotChartNode.SetTitle("Screw - Bone Contact")
         plotChartNode.SetXAxisTitle('Screw Percentile (Head - Tip)')
         plotChartNode.SetYAxisTitle('Average HU Contact')
 
-        # Retrieve/Create plot table node
+        # Retrieve (or create) a table node for data
         firstPlotSeries = plotChartNode.GetNthPlotSeriesNode(0)
         plotTableNode = firstPlotSeries.GetTableNode() if firstPlotSeries else None
         if not plotTableNode:
             plotTableNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTableNode", "Screw - Bone Contact table")
 
-        # Remove all existing columns and add new ones
+        # Clear any old data
         plotTableNode.RemoveAllColumns()
+
+        # Columns for X axis and a reference line (e.g., cortical threshold)
         arrX = vtk.vtkFloatArray()
         arrX.SetName("Screw Percentile")
         plotTableNode.AddColumn(arrX)
+
         arrCortical = vtk.vtkFloatArray()
         arrCortical.SetName("Cortical Bone")
         plotTableNode.AddColumn(arrCortical)
-        arrCancellous = vtk.vtkFloatArray()
-        arrCancellous.SetName("Cancellous Bone")
-        plotTableNode.AddColumn(arrCancellous)
 
-        # Set the number of segments to match the increased spatial resolution
         numSegments = 50
         plotTable = plotTableNode.GetTable()
         plotTable.SetNumberOfRows(numSegments)
         for i in range(numSegments):
             plotTable.SetValue(i, 0, i * (100.0 / numSegments))
-            plotTable.SetValue(i, 1, 375)
-            plotTable.SetValue(i, 2, 135)
+            plotTable.SetValue(i, 1, self.__corticalMin)
 
-        arrays = [arrCortical, arrCancellous]
+        # Reference lines
+        arrays = [arrCortical]
 
-        # Add the screw contact data arrays for each screw
+        # Append each screw's contact array
         for i in range(screwCount):
             arrScrew = vtk.vtkFloatArray()
-            arrScrew.SetName('Screw %s' % i)
+            arrScrew.SetName(f"Screw {i}")
             arrScrew.SetNumberOfValues(numSegments)
             screwValues = self.screwContact[i]
             for j in range(numSegments):
@@ -510,49 +654,72 @@ class GradeStep(PedicleScrewSimulatorStep):
             plotTableNode.AddColumn(arrScrew)
             arrays.append(arrScrew)
 
-        # Update or create plot series nodes
+        colors = [
+            (1, 0, 0),  # Red
+            (0.74, 0.25, 0.11),
+            (0.11, 0.32, 0.64),
+            (0.89, 0.70, 0.02),
+            (0.47, 0.67, 0.33),
+            (0.56, 0.39, 0.64),
+            (0.95, 0.61, 0.37),
+            (0.53, 0.00, 0.00),
+            (0.00, 0.80, 0.95),
+            (0.35, 0.34, 0.30),
+            (0.47, 0.31, 0.22)
+        ]
+
+        # Create or update each plot series node
         for arrIndex, arr in enumerate(arrays):
             plotSeriesNode = plotChartNode.GetNthPlotSeriesNode(arrIndex)
             if not plotSeriesNode:
                 plotSeriesNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLPlotSeriesNode")
                 plotChartNode.AddAndObservePlotSeriesNodeID(plotSeriesNode.GetID())
-            plotSeriesNode.SetName("{0}".format(arr.GetName()))
+
+            plotSeriesNode.SetName(arr.GetName())
             plotSeriesNode.SetAndObserveTableNodeID(plotTableNode.GetID())
             plotSeriesNode.SetXColumnName(arrX.GetName())
             plotSeriesNode.SetYColumnName(arr.GetName())
             plotSeriesNode.SetPlotType(slicer.vtkMRMLPlotSeriesNode.PlotTypeScatter)
-            if arrIndex < 2:
+
+            # Use dashed line for the reference, solid for actual screw data
+            if arrIndex < 1:
                 plotSeriesNode.SetLineStyle(slicer.vtkMRMLPlotSeriesNode.LineStyleDash)
             else:
                 plotSeriesNode.SetLineStyle(slicer.vtkMRMLPlotSeriesNode.LineStyleSolid)
             plotSeriesNode.SetMarkerStyle(slicer.vtkMRMLPlotSeriesNode.MarkerStyleNone)
-            plotSeriesNode.SetUniqueColor()
 
-        # Remove any extra plot series nodes
+            # Assign a color from our palette
+            color = colors[arrIndex % len(colors)]
+            plotSeriesNode.SetColor(color[0], color[1], color[2])
+
+            # Increase line width for better contrast
+            if hasattr(plotSeriesNode, 'SetLineWidth'):
+                plotSeriesNode.SetLineWidth(2)
+
+        # Remove any extra series if necessary
         while plotChartNode.GetNumberOfPlotSeriesNodes() > len(arrays):
-            plotChartNode.RemoveNthPlotSeriesNodeID(plotChartNode.GetNumberOfPlotSeriesNodes() - 1)
+            plotChartNode.RemoveNthPlotSeriesNodeID(
+                plotChartNode.GetNumberOfPlotSeriesNodes() - 1
+            )
 
     def clearGrade(self):
-        # Clear chart
+        # Remove chart if exists
         if self.cvn:
             self.cvn.SetChartNodeID(None)
 
-        # For each fiducial, restore original screw model and remove graded screw model
         fiducial = self.fiducialNode()
         fidCount = fiducial.GetNumberOfControlPoints()
         for i in range(fidCount):
-          # fiducial.SetNthControlPointVisibility(i, False)
-          fidName = fiducial.GetNthControlPointLabel(i)
-          screwModel = slicer.mrmlScene.GetFirstNodeByName('Screw %s' % fidName)
-          if screwModel != None:
-              modelDisplay = screwModel.GetDisplayNode()
-              modelDisplay.SetColor(0.12,0.73,0.91)
-              modelDisplay.VisibilityOn()
+            fidName = fiducial.GetNthControlPointLabel(i)
+            screwModel = slicer.mrmlScene.GetFirstNodeByName('Screw %s' % fidName)
+            if screwModel and screwModel.GetDisplayNode():
+                screwModel.GetDisplayNode().SetColor(0.12, 0.73, 0.91)
+                screwModel.GetDisplayNode().VisibilityOn()
 
-          gradeModel = slicer.mrmlScene.GetFirstNodeByName('Grade model %s' % fidName)
-          if gradeModel != None:
-              slicer.mrmlScene.RemoveNode(gradeModel)
+            gradeModel = slicer.mrmlScene.GetFirstNodeByName('Grade model %s' % fidName)
+            if gradeModel:
+                slicer.mrmlScene.RemoveNode(gradeModel)
 
-          headModel = slicer.mrmlScene.GetFirstNodeByName('Head %s' % fidName)
-          if headModel != None:
-              slicer.mrmlScene.RemoveNode(headModel)
+            headModel = slicer.mrmlScene.GetFirstNodeByName('Head %s' % fidName)
+            if headModel:
+                slicer.mrmlScene.RemoveNode(headModel)
