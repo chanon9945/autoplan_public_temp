@@ -40,7 +40,6 @@ class ScrewStep(PedicleScrewSimulatorStep):
           (0.00, 0.80, 0.95),
           (0.35, 0.34, 0.30),
           (0.47, 0.31, 0.22)
-
       ]
       self.screwCount = 0
       self.currentFidIndex = 0
@@ -254,7 +253,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
         except:
             pedicleLength = 0.0
         try:
-            pedicleWidth = float(pedicleWidthStr.replace(" mm", "").strip())
+            pedicleWidth = float(pedicleWidthStr.replace(" mm", "").strip()) - 1
         except:
             pedicleWidth = 0.0
 
@@ -1058,7 +1057,6 @@ class ScrewStep(PedicleScrewSimulatorStep):
         # Populate the combo box with current fiducials
         self.updateFiducialComboBox()
 
-        # ----------------------------------------------------------------------
         # Attempt to find the "T-1" landmark by scanning the updated fiducial list
         t1Index = -1
         for i, label in enumerate(self.fiduciallist):
