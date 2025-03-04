@@ -38,5 +38,5 @@ class Robot:
         self.reach = reach
         self.joint_1_limit = [-180, 180]
         self.joint_2_limit = [-90, 90]
-        self.link_1 = Link('y', resolution, limits=self.joint_1_limit)
-        self.link_2 = Link('z', resolution, translate=np.array([0, reach, 0]).reshape(3, 1), limits=self.joint_2_limit)
+        self.link_1_transforms = Link('y', resolution, limits=self.joint_1_limit)
+        self.link_2_transforms = Link('z', resolution, translate=np.array([0, reach, 0]).reshape(3, 1), limits=self.joint_2_limit)
