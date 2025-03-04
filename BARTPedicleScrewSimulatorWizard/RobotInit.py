@@ -31,6 +31,9 @@ class Link:
             t1 = HomogeneousTransform(axis, self.joint_limit[i]).get_transform()
             t2 = HomogeneousTransform(axis, 0, translate).get_transform()
             self.transform[:, :, i] = t1 @ t2
+    
+    def get_transform(self,index):
+        return self.transform[:,:,index]
 
 class Robot:
     def __init__(self, resolution, reach):
