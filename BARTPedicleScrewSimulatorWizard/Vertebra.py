@@ -357,7 +357,7 @@ class Vertebra:
         self.pedicle_point_cloud = maskedVolumeToPointCloud(self.pedicle_ROI_mask)
 
         coeff,latent,score = apply_pca(self.pedicle_point_cloud)
-        pedicle_center_point = np.mean(np.array(self.pedicle_point_cloud), axis=0)
+        self.pedicle_center_point = np.mean(np.array(self.pedicle_point_cloud), axis=0)
         scalingFactor = np.sqrt(latent)*2
         self.pcaVectors = coeff * scalingFactor
 
