@@ -156,6 +156,34 @@ def get_masked_centroid(volume, threshold=0):
 # centroid = get_masked_centroid(volume, threshold=0)
 # print("Centroid:", centroid)
 
+def centroid_shift(coordinateX, coordinateY, coordinateZ, maskIn):
+    """
+    Recursively finds a shifted centroid along the Y-axis for the given mask.
+    
+    If coordinateY is at the top of the image (or first index) or if the mask at
+    (coordinateX, coordinateY, coordinateZ) is 0, returns the current coordinates.
+    Otherwise, it decrements coordinateY until one of those conditions is met.
+    
+    Parameters:
+        coordinateX (int): The X index.
+        coordinateY (int): The Y index (0-indexed).
+        coordinateZ (int): The Z index.
+        maskIn (np.ndarray): A 3D NumPy array representing the mask.
+        
+    Returns:
+        (shiftedX, shiftedY) (tuple): The adjusted X and Y indices.
+    """
+    # Base case: if we are at the first row (index 0) then return the current position.
+    if coordinateY <= 0:
+        return coordinateX, coordinateY
+    
+    # If the mask at the given coordinate is 0, return the current coordinates.
+    if maskIn[coordinateX, coordinateY, coordinateZ] == 0:
+        return coordinateX, coordinateY
+    else:
+        # Otherwise, recursively decrement the Y coordinate.
+        return centroid_shift(coordinateX, coordinateY - 1, coordinateZ, maskIn)
+
 class Vertebra:
     def __init__(self,mask,volume):
         self.mask = mask
