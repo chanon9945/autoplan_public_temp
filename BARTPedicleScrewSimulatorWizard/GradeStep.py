@@ -59,7 +59,7 @@ class GradeStep(PedicleScrewSimulatorStep):
             "% Screw in\n HD Bone\n (>375HU)",
             "GR Score"
         ]
-        # 6 columns
+        # 5 columns
         self.screwTable = qt.QTableWidget(0, 5)
         self.screwTable.sortingEnabled = False
         self.screwTable.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
@@ -146,6 +146,7 @@ class GradeStep(PedicleScrewSimulatorStep):
         )
 
     def onTableCellClicked(self):
+        # If user clicks column 0, we "focus" camera on that screw
         if self.screwTable.currentColumn() == 0:
             self.currentFid = self.screwTable.currentRow()
             position = [0, 0, 0]
@@ -228,6 +229,77 @@ class GradeStep(PedicleScrewSimulatorStep):
         greenController.setSliceOffsetValue(coords[1])
         redController.setSliceOffsetValue(coords[2])
 
+    def createOutsidePortionModel(self, inputModelNode, labelArrayName="NRRDImage", outsideModelName="OutsideSeg"):
+        """
+        Given a probed model node (points labeled > 0 = inside seg, 0 = outside seg),
+        extract all 'outside' points (i.e. label = 0) and make a new model node to visualize them.
+        """
+        polyData = inputModelNode.GetPolyData()
+        if not polyData or not polyData.GetPointData().GetScalars(labelArrayName):
+            logging.warning(f"No '{labelArrayName}' array found on {inputModelNode.GetName()}")
+            return None
+
+        # threshold 0.0 to grab the 'outside' portion
+        threshold = vtk.vtkThreshold()
+        threshold.SetInputData(polyData)
+        threshold.SetInputArrayToProcess(0, 0, 0, 0, labelArrayName)
+        threshold.SetThresholdFunction(vtk.vtkThreshold.THRESHOLD_BETWEEN)
+        threshold.SetLowerThreshold(0.0)
+        threshold.SetUpperThreshold(0.0)
+        threshold.Update()
+
+        outsideDataSet = threshold.GetOutput()
+        if not outsideDataSet or outsideDataSet.GetNumberOfPoints() == 0:
+            logging.info(f"No outside points for {inputModelNode.GetName()}")
+            return None
+
+        # Convert unstructured grid -> polydata
+        surfaceFilter = vtk.vtkGeometryFilter()
+        surfaceFilter.SetInputData(outsideDataSet)
+        surfaceFilter.Update()
+        outsidePolyData = surfaceFilter.GetOutput()
+        if not outsidePolyData or outsidePolyData.GetNumberOfPoints() == 0:
+            logging.info(f"No outside geometry for {inputModelNode.GetName()}")
+            return None
+
+        # Make a new Model Node
+        outsideModelNode = slicer.mrmlScene.AddNewNodeByClass(
+            "vtkMRMLModelNode", f"{outsideModelName}_{inputModelNode.GetName()}"
+        )
+        outsideModelNode.SetAndObservePolyData(outsidePolyData)
+
+        # Give it a display node
+        displayNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelDisplayNode")
+        displayNode.SetColor(1.0, 0.0, 0.0)
+        displayNode.SetOpacity(0.6)
+        outsideModelNode.SetAndObserveDisplayNodeID(displayNode.GetID())
+
+        # Copy any parent transform
+        parentTx = inputModelNode.GetParentTransformNode()
+        if parentTx:
+            outsideModelNode.SetAndObserveTransformNodeID(parentTx.GetID())
+
+        return outsideModelNode
+
+    def getMergedSegmentationPolyData(self, segmentationNode):
+        """
+        Merge all segments in 'segmentationNode' into a single polydata surface.
+        """
+        appendFilter = vtk.vtkAppendPolyData()
+        segmentation = segmentationNode.GetSegmentation()
+        for i in range(segmentation.GetNumberOfSegments()):
+            segId = segmentation.GetNthSegmentID(i)
+            segPolyData = vtk.vtkPolyData()
+            segmentationNode.GetClosedSurfaceRepresentation(segId, segPolyData)
+            appendFilter.AddInputData(segPolyData)
+        appendFilter.Update()
+
+        # Clean
+        cleaner = vtk.vtkCleanPolyData()
+        cleaner.SetInputData(appendFilter.GetOutput())
+        cleaner.Update()
+        return cleaner.GetOutput()
+
     def gradeScrews(self):
         pNode = self.parameterNode()
         self.__inputScalarVol = pNode.GetNodeReference('baselineVolume')
@@ -248,40 +320,33 @@ class GradeStep(PedicleScrewSimulatorStep):
 
     def cropScrew(self, inputModelNode, area):
         """
-        Utility to isolate the 'head' (cylindrical crop) or 'shaft' (box crop) portion of the screw,
-        and optionally display the bounding cylinder/box in the 3D scene.
+        Utility to isolate the 'head' or 'shaft' portion of the screw.
         """
         bounds = inputModelNode.GetPolyData().GetBounds()
 
         if area == 'head':
-            # Define vertical bounds for the head.
             yMin = bounds[2]
             yMax = bounds[3] - 20
 
-            # Create a cylinder oriented along the y-axis (used as an ImplicitFunction).
             cylinder = vtk.vtkCylinder()
             cylinder.SetAxis(0, 1, 0)
 
-            # Center the cylinder in the X-Z plane.
             centerX = (bounds[0] + bounds[1]) / 2.0
             centerZ = (bounds[4] + bounds[5]) / 2.0
             cylinder.SetCenter(centerX, 0, centerZ)
 
-            # Use the larger of half the X or Z extents as the radius.
             radiusX = (bounds[1] - bounds[0]) / 2.0
             radiusZ = (bounds[5] - bounds[4]) / 2.0
             cylinder.SetRadius(max(radiusX, radiusZ))
 
-            # Create two planes to cap the cylinder along the y-axis.
             lowerPlane = vtk.vtkPlane()
             lowerPlane.SetOrigin(0, yMin, 0)
-            lowerPlane.SetNormal(0, -1, 0)  # inside: y >= yMin
+            lowerPlane.SetNormal(0, -1, 0)  # y >= yMin
 
             upperPlane = vtk.vtkPlane()
             upperPlane.SetOrigin(0, yMax, 0)
-            upperPlane.SetNormal(0, 1, 0)  # inside: y <= yMax
+            upperPlane.SetNormal(0, 1, 0)   # y <= yMax
 
-            # Combine the cylinder and planes via an intersection.
             clipFunction = vtk.vtkImplicitBoolean()
             clipFunction.SetOperationTypeToIntersection()
             clipFunction.AddFunction(cylinder)
@@ -292,16 +357,11 @@ class GradeStep(PedicleScrewSimulatorStep):
             extract.SetImplicitFunction(clipFunction)
             extract.SetInputData(inputModelNode.GetPolyData())
             extract.Update()
-            croppedPolyData = extract.GetOutput()
-
-            return croppedPolyData
+            return extract.GetOutput()
 
         elif area == 'shaft':
-            # Define vertical bounds for the shaft.
             yMin = bounds[3] - 20
             yMax = bounds[3]
-
-            # Create a box (vtkBox) crop for the shaft.
             cropBox = vtk.vtkBox()
             cropBox.SetBounds(bounds[0], bounds[1], yMin, yMax, bounds[4], bounds[5])
 
@@ -309,81 +369,158 @@ class GradeStep(PedicleScrewSimulatorStep):
             extract.SetImplicitFunction(cropBox)
             extract.SetInputData(inputModelNode.GetPolyData())
             extract.Update()
-            croppedPolyData = extract.GetOutput()
-
-            return croppedPolyData
+            return extract.GetOutput()
 
         else:
             raise ValueError(f"Unknown area specified: {area}. Valid options are 'head' or 'shaft'.")
 
-    def computeShaftCoverageStatus(self, screwModelNode, segmentationNode):
+    def computeGRScore(self, screwModelNode, segmentationNode):
         """
-        Returns one of:
-          "All"   if entire shaft is inside segmentation
-          "Yes"   if partially inside
-          "No"    if no points are inside
-          "None"  if seg node is missing or empty
+        Classify as:
+            Grade A: Entire shaft is inside segmentation (no cortical breach).
+            Grade B: Breach but <= 2 mm.
+            Grade C: Breach <= 4 mm.
+            Grade D: Breach <= 6 mm.
+            Grade E: No coverage or breach > 6 mm
+
         """
         if not segmentationNode:
-            return "None"
+            return "E"
 
-        # Get shaft-only polydata
+        # Crop the head
         shaftPolyData = self.cropScrew(screwModelNode, 'head')
         if (not shaftPolyData) or (shaftPolyData.GetNumberOfPoints() == 0):
-            return "No"
+            # No coverage => Grade E
+            return "E"
 
-        # Create a temp model to hold the shaft geometry
+        # Make a temporary shaft model node
         shaftModelNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "TempShaft")
         shaftModelNode.SetAndObservePolyData(shaftPolyData)
 
-        # Harden transform if needed
-        if screwModelNode.GetParentTransformNode():
-            shaftModelNode.SetAndObserveTransformNodeID(screwModelNode.GetParentTransformNode().GetID())
+        parentTx = screwModelNode.GetParentTransformNode()
+        if parentTx:
+            shaftModelNode.SetAndObserveTransformNodeID(parentTx.GetID())
             slicer.vtkSlicerTransformLogic().hardenTransform(shaftModelNode)
 
         # Export segmentation to labelmap
         labelmapNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "TempLabel")
         slicer.modules.segmentations.logic().ExportAllSegmentsToLabelmapNode(segmentationNode, labelmapNode)
 
-        # Create output model node for ProbeVolumeWithModel
-        outputModelNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "TempProbeOutput")
-
-        # Run CLI
+        # Probe the shaft
+        probedModelNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "TempProbedShaft")
         parameters = {
             "InputVolume": labelmapNode.GetID(),
             "InputModel": shaftModelNode.GetID(),
-            "OutputModel": outputModelNode.GetID(),
+            "OutputModel": probedModelNode.GetID(),
         }
         slicer.cli.runSync(slicer.modules.probevolumewithmodel, None, parameters)
 
-        coverageStatus = "No"
-        polyData = outputModelNode.GetPolyData()
-        if polyData and (polyData.GetNumberOfPoints() > 0):
+        coverage = "No"
+        polyData = probedModelNode.GetPolyData()
+        if polyData and polyData.GetNumberOfPoints() > 0:
             labelArray = polyData.GetPointData().GetScalars("NRRDImage")
             if labelArray:
-                numPoints = polyData.GetNumberOfPoints()
+                numPoints = labelArray.GetNumberOfTuples()
                 insideCount = 0
                 for i in range(numPoints):
                     if labelArray.GetTuple1(i) > 0:
                         insideCount += 1
 
                 if insideCount == 0:
-                    coverageStatus = "No"
+                    coverage = "No"
                 elif insideCount == numPoints:
-                    coverageStatus = "A"
+                    coverage = "A"
                 else:
-                    coverageStatus = "<A"
+                    coverage = "<A"
 
-        # Clean up
+        finalGrade = "E"
+
+        if coverage == "A":
+            # Completely inside => A
+            finalGrade = "A"
+
+        elif coverage == "No":
+            # No coverage => E
+            finalGrade = "E"
+
+        else:
+            # create outside portion + measure max distance
+            outsideModelNode = self.createOutsidePortionModel(
+                probedModelNode, "NRRDImage", f"OutsideSeg_{screwModelNode.GetName()}"
+            )
+            if outsideModelNode:
+                segPolyData = self.getMergedSegmentationPolyData(segmentationNode)
+                if segPolyData and segPolyData.GetNumberOfPoints() > 0:
+                    #Fast Spatial Queries
+                    locator = vtk.vtkCellLocator()
+                    locator.SetDataSet(segPolyData)
+                    locator.BuildLocator()
+
+                    outsidePolyData = outsideModelNode.GetPolyData()
+                    nOutside = outsidePolyData.GetNumberOfPoints()
+
+                    maxDistance = 0.0
+                    maxOutsidePt = [0.0, 0.0, 0.0]
+                    maxBoundaryPt = [0.0, 0.0, 0.0]
+                    tempClosest = [0.0, 0.0, 0.0]
+
+                    for i in range(nOutside):
+                        outsidePt = [0.0, 0.0, 0.0]
+                        outsidePolyData.GetPoint(i, outsidePt)
+
+                        cellId = vtk.mutable(0)
+                        subId = vtk.mutable(0)
+                        dist2 = vtk.mutable(0.0)
+                        locator.FindClosestPoint(outsidePt, tempClosest, cellId, subId, dist2)
+
+                        dist = math.sqrt(dist2.get())
+                        if dist > maxDistance:
+                            maxDistance = dist
+                            maxOutsidePt[:] = outsidePt
+                            maxBoundaryPt[:] = tempClosest
+
+                    # classify based on maxDistance
+                    if maxDistance <= 2.0:
+                        finalGrade = "B"
+                    elif maxDistance <= 4.0:
+                        finalGrade = "C"
+                    elif maxDistance <= 6.0:
+                        finalGrade = "D"
+                    else:
+                        finalGrade = "E"
+
+                    # create the line model for vector
+                    if maxDistance > 0.0:
+                        lineSource = vtk.vtkLineSource()
+                        lineSource.SetPoint1(maxOutsidePt)
+                        lineSource.SetPoint2(maxBoundaryPt)
+                        lineSource.Update()
+
+                        lineModelNode = slicer.mrmlScene.AddNewNodeByClass(
+                            "vtkMRMLModelNode", f"Vector_{screwModelNode.GetName()}"
+                        )
+                        lineModelNode.SetAndObservePolyData(lineSource.GetOutput())
+
+                        lineDisplay = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelDisplayNode")
+                        lineDisplay.SetColor(1.0, 1.0, 0.0)  # e.g. Yellow
+                        lineDisplay.SetLineWidth(3.0)
+                        lineModelNode.SetAndObserveDisplayNodeID(lineDisplay.GetID())
+
+            else:
+                finalGrade = "E"
+
+        # Cleanup
         slicer.mrmlScene.RemoveNode(shaftModelNode)
         slicer.mrmlScene.RemoveNode(labelmapNode)
-        slicer.mrmlScene.RemoveNode(outputModelNode)
+        slicer.mrmlScene.RemoveNode(probedModelNode)
 
-        return coverageStatus
+        return finalGrade
 
     def cropPoints(self, screwModelNode, showCylinder=True, headLength=15.1):
-
-        # Get the full bounding box
+        """
+        Create a vtkSelectEnclosedPoints object that indicates which points
+        lie within a "shaft" portion of the screw.
+        """
         fullBounds = screwModelNode.GetPolyData().GetBounds()
 
         # Clip off the top "headLength" mm in Y.
@@ -391,10 +528,9 @@ class GradeStep(PedicleScrewSimulatorStep):
         if yClip < fullBounds[2]:
             yClip = fullBounds[2]
 
-        # Create a plane for y <= yClip
         plane = vtk.vtkPlane()
         plane.SetOrigin(0, yClip, 0)
-        plane.SetNormal(0, 1, 0)  # inside is y <= yClip
+        plane.SetNormal(0, 1, 0)  # inside: y <= yClip
 
         clipFilter = vtk.vtkExtractPolyDataGeometry()
         clipFilter.SetImplicitFunction(plane)
@@ -403,44 +539,38 @@ class GradeStep(PedicleScrewSimulatorStep):
 
         shaftPolyData = clipFilter.GetOutput()
         if not shaftPolyData or shaftPolyData.GetNumberOfPoints() == 0:
-            # If there's nothing after clipping, return a dummy filter
+            # If there's nothing after clipping, return a dummy
             select = vtk.vtkSelectEnclosedPoints()
-            select.SetInputData(screwModelNode.GetPolyData())  # or empty
+            select.SetInputData(screwModelNode.GetPolyData())
             emptyPoly = vtk.vtkPolyData()  # empty surface
             select.SetSurfaceData(emptyPoly)
             select.Update()
             return select
 
-        # Compute bounding box *only* for the clipped region
+        # bounding box for clipped region
         shaftBounds = shaftPolyData.GetBounds()
-        # shaftBounds = (xMin, xMax, yMin, yMax, zMin, zMax)
-
-        # Create a cylinder using those narrower shaft bounds
         shaftHeight = shaftBounds[3] - shaftBounds[2]
         centerX = (shaftBounds[0] + shaftBounds[1]) / 2.0
         centerY = (shaftBounds[2] + shaftBounds[3]) / 2.0
         centerZ = (shaftBounds[4] + shaftBounds[5]) / 2.0
 
-        # Radius from the narrower bounding box
         radiusX = (shaftBounds[1] - shaftBounds[0]) / 2.0
         radiusZ = (shaftBounds[5] - shaftBounds[4]) / 2.0
         shaftRadius = max(radiusX, radiusZ)
 
         cylinder = vtk.vtkCylinderSource()
-        cylinder.SetResolution(50)  # smoother cylinder
+        cylinder.SetResolution(50)
         cylinder.SetHeight(shaftHeight)
         cylinder.SetRadius(shaftRadius)
         cylinder.CappingOn()
         cylinder.Update()
 
-        # Rotate cylinder so its axis aligns with Y
         rotateTransform = vtk.vtkTransform()
         rotateFilter = vtk.vtkTransformPolyDataFilter()
         rotateFilter.SetTransform(rotateTransform)
         rotateFilter.SetInputConnection(cylinder.GetOutputPort())
         rotateFilter.Update()
 
-        # Translate cylinder to the shaft center
         translateTransform = vtk.vtkTransform()
         translateTransform.Translate(centerX, centerY, centerZ)
         translateFilter = vtk.vtkTransformPolyDataFilter()
@@ -450,22 +580,17 @@ class GradeStep(PedicleScrewSimulatorStep):
 
         finalCylinderPolyData = translateFilter.GetOutput()
 
-        # Optionally visualize the cylinder
+        # Optionally show the cylinder
         if showCylinder:
             cylinderModelName = f"Cylinder_{screwModelNode.GetName()}"
-            cylinderModelNode = slicer.mrmlScene.AddNewNodeByClass(
-                "vtkMRMLModelNode", cylinderModelName
-            )
+            cylinderModelNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", cylinderModelName)
             cylinderModelNode.SetAndObservePolyData(finalCylinderPolyData)
 
-            cylinderDisplayNode = slicer.mrmlScene.AddNewNodeByClass(
-                "vtkMRMLModelDisplayNode"
-            )
+            cylinderDisplayNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelDisplayNode")
             cylinderDisplayNode.SetColor(1, 0, 0)  # red
-            cylinderDisplayNode.SetOpacity(0.3)  # semi-transparent
+            cylinderDisplayNode.SetOpacity(0.3)
             cylinderModelNode.SetAndObserveDisplayNodeID(cylinderDisplayNode.GetID())
 
-            # Apply the same parent transform (if any) so it moves with the screw
             parentTransform = screwModelNode.GetParentTransformNode()
             if parentTransform:
                 cylinderModelNode.SetAndObserveTransformNodeID(parentTransform.GetID())
@@ -478,21 +603,17 @@ class GradeStep(PedicleScrewSimulatorStep):
         return select
 
     def gradeScrew(self, screwModel, transformFid, fidName, screwIndex):
-        # Crop out head
+        # Crop out head portion
         croppedScrew = self.cropScrew(screwModel, 'head')
 
-        # Create an input model node for ProbeVolumeWithModel
+        # Make a temp node for ProbeVolumeWithModel
         inputModel = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "TempInputModel")
         inputModel.SetAndObservePolyData(croppedScrew)
         inputModel.SetAndObserveTransformNodeID(transformFid.GetID())
-
-        # Harden the transform so the geometry
         slicer.vtkSlicerTransformLogic().hardenTransform(inputModel)
 
-        # Create an output model node for the probed result
+        # Create the probed output
         output = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", f"Grade model {fidName}")
-
-        # Run ProbeVolumeWithModel
         parameters = {
             "InputVolume": self.__inputScalarVol.GetID(),
             "InputModel": inputModel.GetID(),
@@ -500,32 +621,31 @@ class GradeStep(PedicleScrewSimulatorStep):
         }
         slicer.cli.runSync(slicer.modules.probevolumewithmodel, None, parameters)
 
-        # Hide the original screw
+        # Hide original screw
         if screwModel.GetDisplayNode():
             screwModel.GetDisplayNode().SetColor(0,1,0)
             screwModel.GetDisplayNode().VisibilityOff()
 
-        # Show the head portion as a new model node
+        # Show "head" portion as a new model
         headPolyData = self.cropScrew(screwModel, 'shaft')
         headModel = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", f"Head {fidName}")
         headModel.SetAndObservePolyData(headPolyData)
         headModel.SetAndObserveTransformNodeID(transformFid.GetID())
 
-        # Make a new display node for the head portion
         headDisplay = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelDisplayNode")
         headDisplay.SetColor(0,1,0)
         headModel.SetAndObserveDisplayNodeID(headDisplay.GetID())
 
-        # Coverage status in the segmentation
+        # GRScore
         segNode = slicer.mrmlScene.GetFirstNodeByName("Segmentation")
-        coverageStatus = self.computeShaftCoverageStatus(screwModel, segNode)
-        coverageItem = qt.QTableWidgetItem(coverageStatus)
-        self.screwTable.setItem(screwIndex, 4, coverageItem)
+        GRScore = self.computeGRScore(screwModel, segNode)
+        GRItem = qt.QTableWidgetItem(GRScore)
+        self.screwTable.setItem(screwIndex, 4, GRItem)
 
-        # Remove the temporary input model
+        # Cleanup
         slicer.mrmlScene.RemoveNode(inputModel)
 
-        # Compute HU-based contact
+        # 8. HU-based contact
         self.contact(output, screwModel, fidName, screwIndex)
 
     def contact(self, outputModel, screwModel, fidName, screwIndex):
@@ -533,7 +653,7 @@ class GradeStep(PedicleScrewSimulatorStep):
         Classify points in the shaft region by HU ranges:
          - Cancellous: < corticalMin
          - Cortical: >= corticalMin
-        Then put the percentages in the table columns 2-3.
+        Then store the percentages in columns 2 and 3.
         """
         insidePoints = self.cropPoints(screwModel, showCylinder=True)
         polyData = outputModel.GetPolyData()
@@ -560,14 +680,12 @@ class GradeStep(PedicleScrewSimulatorStep):
         corticalCount = 0
         totalCount = 0
 
-        # Iterate over each point in the probed geometry
         tmpHU = [0]
         coord = [0, 0, 0]
         for i in range(numTuples):
-            # Only consider points in the "shaft"
+            # Only consider points that are inside the 'shaft'
             if insidePoints.IsInside(i) != 1:
                 continue
-
             totalCount += 1
             scalarsArray.GetTypedTuple(i, tmpHU)
             pointsArray.GetPoints().GetPoint(i, coord)
@@ -580,7 +698,7 @@ class GradeStep(PedicleScrewSimulatorStep):
             if tmpHU[0] >= self.__corticalMin:
                 corticalCount += 1
 
-        # Compute average HU along the shaft (for charting)
+        # Mean HU along the shaft
         avgHUalongShaft = [0.0]*numSegments
         for j in range(numSegments):
             if nPoints[j] > 0:
@@ -589,13 +707,13 @@ class GradeStep(PedicleScrewSimulatorStep):
         # Keep for chart display
         self.screwContact.insert(screwIndex, avgHUalongShaft)
 
-        # Percentages
         corticalPercent = 0.0
         if totalCount > 0:
             corticalPercent = 100.0 * corticalCount / totalCount
             cancellousPercent = 100.0 - corticalPercent
+        else:
+            cancellousPercent = 0.0
 
-        # Place them in columns
         ldItem = qt.QTableWidgetItem(str(int(round(cancellousPercent))))
         hdItem = qt.QTableWidgetItem(str(int(round(corticalPercent))))
 
@@ -612,7 +730,7 @@ class GradeStep(PedicleScrewSimulatorStep):
             plotViewNode.SetPlotChartNodeID(plotChartNode.GetID())
 
         plotChartNode.SetTitle("Screw - Bone Contact")
-        plotChartNode.SetXAxisTitle('Screw Percentile (Head - Tip)')
+        plotChartNode.SetXAxisTitle('Screw Percentile (Tip - Head)')
         plotChartNode.SetYAxisTitle('Average HU Contact')
 
         # Retrieve (or create) a table node for data
@@ -624,7 +742,7 @@ class GradeStep(PedicleScrewSimulatorStep):
         # Clear any old data
         plotTableNode.RemoveAllColumns()
 
-        # Columns for X axis and a reference line (e.g., cortical threshold)
+        # X column + reference line
         arrX = vtk.vtkFloatArray()
         arrX.SetName("Screw Percentile")
         plotTableNode.AddColumn(arrX)
@@ -640,10 +758,9 @@ class GradeStep(PedicleScrewSimulatorStep):
             plotTable.SetValue(i, 0, i * (100.0 / numSegments))
             plotTable.SetValue(i, 1, self.__corticalMin)
 
-        # Reference lines
         arrays = [arrCortical]
 
-        # Append each screw's contact array
+        # Add each screw's contact array
         for i in range(screwCount):
             arrScrew = vtk.vtkFloatArray()
             arrScrew.SetName(f"Screw {i}")
@@ -654,8 +771,9 @@ class GradeStep(PedicleScrewSimulatorStep):
             plotTableNode.AddColumn(arrScrew)
             arrays.append(arrScrew)
 
+        # Some color palette
         colors = [
-            (1, 0, 0),  # Red
+            (1, 0, 0),
             (0.74, 0.25, 0.11),
             (0.11, 0.32, 0.64),
             (0.89, 0.70, 0.02),
@@ -668,7 +786,6 @@ class GradeStep(PedicleScrewSimulatorStep):
             (0.47, 0.31, 0.22)
         ]
 
-        # Create or update each plot series node
         for arrIndex, arr in enumerate(arrays):
             plotSeriesNode = plotChartNode.GetNthPlotSeriesNode(arrIndex)
             if not plotSeriesNode:
@@ -681,22 +798,20 @@ class GradeStep(PedicleScrewSimulatorStep):
             plotSeriesNode.SetYColumnName(arr.GetName())
             plotSeriesNode.SetPlotType(slicer.vtkMRMLPlotSeriesNode.PlotTypeScatter)
 
-            # Use dashed line for the reference, solid for actual screw data
-            if arrIndex < 1:
+            # dashed line for reference, solid for screws
+            if arrIndex == 0:
                 plotSeriesNode.SetLineStyle(slicer.vtkMRMLPlotSeriesNode.LineStyleDash)
             else:
                 plotSeriesNode.SetLineStyle(slicer.vtkMRMLPlotSeriesNode.LineStyleSolid)
             plotSeriesNode.SetMarkerStyle(slicer.vtkMRMLPlotSeriesNode.MarkerStyleNone)
 
-            # Assign a color from our palette
             color = colors[arrIndex % len(colors)]
             plotSeriesNode.SetColor(color[0], color[1], color[2])
 
-            # Increase line width for better contrast
             if hasattr(plotSeriesNode, 'SetLineWidth'):
                 plotSeriesNode.SetLineWidth(2)
 
-        # Remove any extra series if necessary
+        # Remove extras
         while plotChartNode.GetNumberOfPlotSeriesNodes() > len(arrays):
             plotChartNode.RemoveNthPlotSeriesNodeID(
                 plotChartNode.GetNumberOfPlotSeriesNodes() - 1
