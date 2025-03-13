@@ -171,6 +171,36 @@ def dfs(image, image_size, i, j, shape, stackX, stackY):
     
     return shape, stackX, stackY
 
+def dfs_iterative(image, image_size, start_i, start_j):
+    shape = np.zeros((image_size[0], image_size[1]), dtype=image.dtype)
+    stack_x = []
+    stack_y = []
+    
+    # Use a stack for DFS
+    to_visit = [(start_i, start_j)]
+    
+    while to_visit:
+        i, j = to_visit.pop()
+        
+        # Skip if out of bounds or already visited
+        if i < 0 or i >= image_size[0] or j < 0 or j >= image_size[1]:
+            continue
+        if shape[i, j] != 0:
+            continue
+        
+        # Mark as visited
+        shape[i, j] = 1
+        stack_x.append(i)
+        stack_y.append(j)
+        
+        # Add neighbors to stack
+        to_visit.append((i+1, j))
+        to_visit.append((i-1, j))
+        to_visit.append((i, j+1))
+        to_visit.append((i, j-1))
+    
+    return shape, stack_x, stack_y
+
 def floodfill(image, i, j):
     """
     Flood fill starting from the seed coordinate (i, j) on a 2D NumPy array.
@@ -192,7 +222,7 @@ def floodfill(image, i, j):
     stackX = [i]
     stackY = [j]
     
-    filled_shape, stackX, stackY = dfs(image, image_size, i, j, shape, stackX, stackY)
+    filled_shape, stackX, stackY = dfs_iterative(image, image_size, i, j, shape, stackX, stackY)
     return filled_shape, stackX, stackY
 
 def cut_pedicle(volIn, yMax, yMin, bufferFront=15, bufferEnd=1):
