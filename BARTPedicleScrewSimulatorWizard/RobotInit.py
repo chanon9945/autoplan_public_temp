@@ -1,6 +1,15 @@
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
+def mc_mean(transforms, resolution):
+    sum_matrix = np.zeros_like(transforms[:, :, 0])
+    for i in range(resolution):
+        sum_matrix += transforms[:, :, i]
+    return sum_matrix / resolution
+
+def m_correction(matrix):
+    return matrix @ np.linalg.inv(np.linalg.inv(matrix.T @ matrix)**0.5)
+
 class HomogeneousTransform:
     def __init__(self, axis='x', angle=0, translate=np.array([0, 0, 0]).reshape(3, 1)):
         # Create a 3x3 rotation matrix from Euler angles.
@@ -43,3 +52,30 @@ class Robot:
         self.joint_2_limit = [-90, 90]
         self.link_1 = Link('y', resolution, limits=self.joint_1_limit)
         self.link_2 = Link('z', resolution, translate=np.array([0, reach, 0]).reshape(3, 1), limits=self.joint_2_limit)
+
+    def get_mean_transforms(self):
+        # Mean of rotation matrices
+        h1_mean_m = mc_mean(self.link_1.transform[0:3, 0:3, :], self.resolution)
+        h2_mean_m = mc_mean(self.link_2.transform[0:3, 0:3, :], self.resolution)
+        
+        # Format correction
+        h1_mean_r = m_correction(h1_mean_m)
+        h2_mean_r = m_correction(h2_mean_m)
+        
+        # Mean of translation
+        h1_mean_t = mc_mean(self.link_1.transform[0:3, 3, :], self.resolution).reshape(3, 1)
+        h2_mean_t = mc_mean(self.link_2.transform[0:3, 3, :], self.resolution).reshape(3, 1)
+        
+        # Create homogeneous transforms
+        h1_mean = np.zeros((4, 4))
+        h2_mean = np.zeros((4, 4))
+        
+        h1_mean[0:3, 0:3] = h1_mean_r
+        h1_mean[0:3, 3] = h1_mean_t.flatten()
+        h1_mean[3, 3] = 1.0
+        
+        h2_mean[0:3, 0:3] = h2_mean_r
+        h2_mean[0:3, 3] = h2_mean_t.flatten()
+        h2_mean[3, 3] = 1.0
+        
+        return h1_mean, h2_mean
