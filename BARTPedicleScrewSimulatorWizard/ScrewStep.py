@@ -1077,7 +1077,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
             qt.QMessageBox.warning(None, "Warning", "Segmentation not found. Please segment the vertebra first.")
             return
         
-        logging.debug("Starting auto-planning...")
+        logging.info("Starting auto-planning...")
         
         # Create a progress dialog
         progressDialog = qt.QProgressDialog("Running auto-planning...", "Cancel", 0, 100, slicer.util.mainWindow())
@@ -1090,7 +1090,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
             # Create a temporary labelmap node
             labelmapNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "TempLabelmap")
             
-            # Export ALL segments to the labelmap (don't filter by name)
+            # Export ALL segments to the labelmap
             segmentIDs = vtk.vtkStringArray()
             segmentation.GetSegmentation().GetSegmentIDs(segmentIDs)
             
@@ -1100,16 +1100,32 @@ class ScrewStep(PedicleScrewSimulatorStep):
                 return
                 
             # Log all available segments to help with debugging
-            logging.debug(f"Available segments ({segmentIDs.GetNumberOfValues()}):")
+            logging.info(f"Available segments ({segmentIDs.GetNumberOfValues()}):")
             for i in range(segmentIDs.GetNumberOfValues()):
                 segID = segmentIDs.GetValue(i)
                 segName = segmentation.GetSegmentation().GetSegment(segID).GetName()
-                logging.debug(f"  {i+1}: ID={segID}, Name={segName}")
+                logging.info(f"  {i+1}: ID={segID}, Name={segName}")
             
-            # Export ALL segments to labelmap
+            # Export segments to labelmap - FIX: use correct method signature
+            # For Slicer 5.6.2, we need to use a different approach
             segmentationLogic = slicer.modules.segmentations.logic()
-            success = segmentationLogic.ExportAllSegmentsToLabelmapNode(
-                segmentation, labelmapNode, inputVolume)
+            
+            # Create a segmentation export node to handle the conversion
+            exportNode = slicer.vtkMRMLSegmentationNode()
+            slicer.mrmlScene.AddNode(exportNode)
+            
+            # Copy segments to the temporary export node
+            exportNode.Copy(segmentation)
+            
+            # Generate binary labelmap representation for the export node
+            exportNode.CreateBinaryLabelmapRepresentation()
+            
+            # Export to labelmap node with reference geometry from input volume
+            success = segmentationLogic.ExportVisibleSegmentsToLabelmapNode(
+                exportNode, labelmapNode, inputVolume)
+            
+            # Remove the temporary export node
+            slicer.mrmlScene.RemoveNode(exportNode)
             
             if not success:
                 progressDialog.close()
@@ -1125,29 +1141,67 @@ class ScrewStep(PedicleScrewSimulatorStep):
             
             # Create the Vertebra object
             from .Vertebra import Vertebra
-            vertebra = Vertebra(labelMapVolumeData, inputVolumeData, self.coords)
+            insertion_coords = [0, 0, 0]
+            self.fidNode.GetNthControlPointPosition(self.currentFidIndex, insertion_coords)
             
-            progressDialog.setValue(70)
-            slicer.app.processEvents()
-            
-            # Use a simplified approach for testing (just return fixed angles)
-            vertical_angle = 5.0
-            horizontal_angle = 0.0
-            
-            # Update UI with calculated angles
-            logging.debug(f"Setting test angles: Vertical = {vertical_angle}°, Horizontal = {horizontal_angle}°")
-            
-            # Apply angles to the sliders
-            self.transformSlider1.setValue(vertical_angle)
-            self.transformSlider2.setValue(horizontal_angle)
-            
-            progressDialog.setValue(100)
-            slicer.app.processEvents()
-            
-            # Clean up
-            slicer.mrmlScene.RemoveNode(labelmapNode)
-            qt.QMessageBox.information(None, "Auto-Planning", "Test auto-planning completed successfully.")
-            
+            try:
+                vertebra = Vertebra(labelMapVolumeData, inputVolumeData, insertion_coords)
+                progressDialog.setValue(50)
+                slicer.app.processEvents()
+                
+                # Initialize auto planner if not already done
+                if not self.autoPlanner:
+                    from .AutoPlanner import PedicleScrewAutoPlanner
+                    self.autoPlanner = PedicleScrewAutoPlanner(
+                        resolution=200,  # Start with lower resolution for faster results
+                        reach=100,
+                        weight=[300, 1, 30, 0.05]
+                    )
+                
+                progressDialog.setValue(60)
+                slicer.app.processEvents()
+                
+                # Run the trajectory planning
+                logging.info(f"Running auto planning for insertion point {insertion_coords}")
+                
+                # Check if progress dialog was canceled
+                if progressDialog.wasCanceled:
+                    # Fix: wasCanceled is a property in some Qt versions, not a method
+                    if callable(progressDialog.wasCanceled):
+                        if progressDialog.wasCanceled():
+                            slicer.mrmlScene.RemoveNode(labelmapNode)
+                            return
+                    else:
+                        if progressDialog.wasCanceled:
+                            slicer.mrmlScene.RemoveNode(labelmapNode)
+                            return
+                    
+                # Run the actual planning
+                _, angles, _ = self.autoPlanner.plan_trajectory(vertebra, insertion_coords)
+                vertical_angle, horizontal_angle = angles
+                
+                progressDialog.setValue(90)
+                slicer.app.processEvents()
+                
+                # Apply angles to the sliders
+                logging.info(f"Setting angles: Vertical = {vertical_angle}°, Horizontal = {horizontal_angle}°")
+                self.transformSlider1.setValue(vertical_angle)
+                self.transformSlider2.setValue(horizontal_angle)
+                
+                progressDialog.setValue(100)
+                slicer.app.processEvents()
+                
+                # Clean up
+                slicer.mrmlScene.RemoveNode(labelmapNode)
+                qt.QMessageBox.information(None, "Auto-Planning", f"Trajectory planning completed successfully.\nVertical angle: {vertical_angle:.1f}°\nHorizontal angle: {horizontal_angle:.1f}°")
+                
+            except Exception as e:
+                logging.error(f"Vertebra processing error: {str(e)}")
+                import traceback
+                logging.error(traceback.format_exc())
+                progressDialog.close()
+                qt.QMessageBox.critical(None, "Error", f"Vertebra processing failed: {str(e)}")
+                
         except Exception as e:
             logging.error(f"Auto-planning error: {str(e)}")
             import traceback
@@ -1159,19 +1213,6 @@ class ScrewStep(PedicleScrewSimulatorStep):
             progressDialog.close()
             if 'labelmapNode' in locals() and labelmapNode is not None:
                 slicer.mrmlScene.RemoveNode(labelmapNode)
-    
-    def getSegmentNames(self, segmentationNode):
-        """Get a list of segment names from the segmentation node"""
-        segmentIDs = vtk.vtkStringArray()
-        segmentationNode.GetSegmentation().GetSegmentIDs(segmentIDs)
-        
-        segmentNames = []
-        for i in range(segmentIDs.GetNumberOfValues()):
-            segmentID = segmentIDs.GetValue(i)
-            segmentName = segmentationNode.GetSegmentation().GetSegment(segmentID).GetName()
-            segmentNames.append(segmentName)
-            
-        return segmentNames
     
     def initializeAutoPlanner(self):
         """Initialize the auto-planning components"""
