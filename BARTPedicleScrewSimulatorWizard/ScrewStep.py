@@ -7,6 +7,8 @@ import math
 import os
 import time
 import logging
+from .Vertebra import Vertebra
+from .RobotInit import Robot
 
 class ScrewStep(PedicleScrewSimulatorStep):
 
@@ -60,6 +62,12 @@ class ScrewStep(PedicleScrewSimulatorStep):
       self.timer2.setInterval(2)
       self.timer2.connect('timeout()', self.reverseScrew)
       self.screwInsert = 0.0
+
+      #Autoplanner parameters
+      self.autoPlanner = None
+      self.resolution = 1000
+      self.reach = 100
+      self.weight = [300, 1, 30, 0.05]
 
 
     def killButton(self):
@@ -202,6 +210,17 @@ class ScrewStep(PedicleScrewSimulatorStep):
       logging.debug("Coords: {0}".format(self.coords))
       self.updateMeasurements()
       self.cameraFocus(self.coords)
+
+      # Add Auto-Plan button after existing buttons
+      self.__autoButton = qt.QPushButton("Auto-Plan Trajectory")
+      self.__autoButton.enabled = True
+      self.__autoButton.setStyleSheet("background-color: purple; color: white;")
+      self.__autoButton.connect('clicked(bool)', self.runAutoPlanning)
+
+      # Add it to your layout - place after existing buttons
+      self.QHBox5 = qt.QHBoxLayout()
+      self.QHBox5.addWidget(self.__autoButton)
+      self.__layout.addRow(self.QHBox5)
 
     def insertScrew(self):
       logging.debug("insert")
@@ -1042,6 +1061,202 @@ class ScrewStep(PedicleScrewSimulatorStep):
         self.fiducial.addItems(self.fiduciallist)
 
         logging.debug(f"Combo box updated with fiduciallist: {self.fiduciallist}")
+
+    def runAutoPlanning(self):
+        """Run automatic trajectory planning for the selected insertion point"""
+        if not self.currentFidLabel:
+            qt.QMessageBox.warning(None, "Warning", "Please select an insertion point first.")
+            return
+            
+        # Get necessary data
+        pNode = self.parameterNode()
+        inputVolume = pNode.GetNodeReference('baselineVolume')
+        segmentation = slicer.mrmlScene.GetFirstNodeByName("Segmentation")
+        
+        if not segmentation:
+            qt.QMessageBox.warning(None, "Warning", "Segmentation not found. Please segment the vertebra first.")
+            return
+        
+        logging.debug("Starting auto-planning...")
+        
+        # Create a progress dialog
+        progressDialog = qt.QProgressDialog("Running auto-planning...", "Cancel", 0, 100, slicer.util.mainWindow())
+        progressDialog.setWindowModality(qt.Qt.WindowModal)
+        progressDialog.setMinimumDuration(0)
+        progressDialog.setValue(10)
+        slicer.app.processEvents()
+        
+        try:
+            # Create a temporary labelmap node
+            labelmapNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "TempLabelmap")
+            
+            # Export ALL segments to the labelmap (don't filter by name)
+            segmentIDs = vtk.vtkStringArray()
+            segmentation.GetSegmentation().GetSegmentIDs(segmentIDs)
+            
+            if segmentIDs.GetNumberOfValues() == 0:
+                progressDialog.close()
+                qt.QMessageBox.warning(None, "Warning", "No segments found in segmentation.")
+                return
+                
+            # Log all available segments to help with debugging
+            logging.debug(f"Available segments ({segmentIDs.GetNumberOfValues()}):")
+            for i in range(segmentIDs.GetNumberOfValues()):
+                segID = segmentIDs.GetValue(i)
+                segName = segmentation.GetSegmentation().GetSegment(segID).GetName()
+                logging.debug(f"  {i+1}: ID={segID}, Name={segName}")
+            
+            # Export ALL segments to labelmap
+            segmentationLogic = slicer.modules.segmentations.logic()
+            success = segmentationLogic.ExportAllSegmentsToLabelmapNode(
+                segmentation, labelmapNode, inputVolume)
+            
+            if not success:
+                progressDialog.close()
+                qt.QMessageBox.warning(None, "Warning", "Failed to export segmentation to labelmap.")
+                return
+            
+            progressDialog.setValue(30)
+            slicer.app.processEvents()
+            
+            # Get the image data
+            labelMapVolumeData = labelmapNode.GetImageData()
+            inputVolumeData = inputVolume.GetImageData()
+            
+            # Create the Vertebra object
+            from .Vertebra import Vertebra
+            vertebra = Vertebra(labelMapVolumeData, inputVolumeData, self.coords)
+            
+            progressDialog.setValue(70)
+            slicer.app.processEvents()
+            
+            # Use a simplified approach for testing (just return fixed angles)
+            vertical_angle = 5.0
+            horizontal_angle = 0.0
+            
+            # Update UI with calculated angles
+            logging.debug(f"Setting test angles: Vertical = {vertical_angle}°, Horizontal = {horizontal_angle}°")
+            
+            # Apply angles to the sliders
+            self.transformSlider1.setValue(vertical_angle)
+            self.transformSlider2.setValue(horizontal_angle)
+            
+            progressDialog.setValue(100)
+            slicer.app.processEvents()
+            
+            # Clean up
+            slicer.mrmlScene.RemoveNode(labelmapNode)
+            qt.QMessageBox.information(None, "Auto-Planning", "Test auto-planning completed successfully.")
+            
+        except Exception as e:
+            logging.error(f"Auto-planning error: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
+            progressDialog.close()
+            qt.QMessageBox.critical(None, "Error", f"Auto-planning failed: {str(e)}")
+        
+        finally:
+            progressDialog.close()
+            if 'labelmapNode' in locals() and labelmapNode is not None:
+                slicer.mrmlScene.RemoveNode(labelmapNode)
+    
+    def getSegmentNames(self, segmentationNode):
+        """Get a list of segment names from the segmentation node"""
+        segmentIDs = vtk.vtkStringArray()
+        segmentationNode.GetSegmentation().GetSegmentIDs(segmentIDs)
+        
+        segmentNames = []
+        for i in range(segmentIDs.GetNumberOfValues()):
+            segmentID = segmentIDs.GetValue(i)
+            segmentName = segmentationNode.GetSegmentation().GetSegment(segmentID).GetName()
+            segmentNames.append(segmentName)
+            
+        return segmentNames
+    
+    def initializeAutoPlanner(self):
+        """Initialize the auto-planning components"""
+        logging.debug("Initializing auto-planner...")
+        
+        # Create Robot to generate workspace
+        self.robot = Robot(self.resolution, self.reach)
+        
+        # Calculate mean transforms (adding this function to Robot)
+        self.h1_mean, self.h2_mean = self.calculate_mean_transforms(self.robot)
+        
+        self.autoPlanner = True
+        logging.debug("Auto-planner initialized.")
+    
+    def calculate_mean_transforms(self, robot):
+        """Calculate mean transforms for the robot workspace"""
+        # Mean of rotation matrices
+        h1_mean_rotation = np.zeros((3, 3))
+        h2_mean_rotation = np.zeros((3, 3))
+        
+        h1_mean_translation = np.zeros(3)
+        h2_mean_translation = np.zeros(3)
+        
+        # Average all transforms (simple mean for rotation, needs correction)
+        for i in range(self.resolution):
+            h1_mean_rotation += robot.link_1.transform[0:3, 0:3, i]
+            h2_mean_rotation += robot.link_2.transform[0:3, 0:3, i]
+            
+            h1_mean_translation += robot.link_1.transform[0:3, 3, i]
+            h2_mean_translation += robot.link_2.transform[0:3, 3, i]
+        
+        h1_mean_rotation /= self.resolution
+        h2_mean_rotation /= self.resolution
+        
+        h1_mean_translation /= self.resolution
+        h2_mean_translation /= self.resolution
+        
+        # Correct rotation matrices to be valid (orthonormal)
+        h1_mean_rotation = self.correct_rotation_matrix(h1_mean_rotation)
+        h2_mean_rotation = self.correct_rotation_matrix(h2_mean_rotation)
+        
+        # Create final homogeneous transforms
+        h1_mean = np.eye(4)
+        h2_mean = np.eye(4)
+        
+        h1_mean[0:3, 0:3] = h1_mean_rotation
+        h1_mean[0:3, 3] = h1_mean_translation
+        
+        h2_mean[0:3, 0:3] = h2_mean_rotation
+        h2_mean[0:3, 3] = h2_mean_translation
+        
+        return h1_mean, h2_mean
+    
+    def correct_rotation_matrix(self, matrix):
+        """Correct a matrix to ensure it's a valid rotation matrix"""
+        # M * (inv(M'*M)^0.5) in Python
+        u, s, vh = np.linalg.svd(matrix, full_matrices=True)
+        return u @ vh
+    
+    def runPlanning(self, vertebra):
+        """Run the trajectory planning algorithm for the given vertebra"""
+        # For now, use a simplified approach - use PCA direction from vertebra
+        # In a full implementation, you would use cost function optimization
+        
+        # Get the main axis of the pedicle from PCA
+        pedicle_direction = vertebra.pcaVectors[:, 2]  # Third principal component
+        
+        # Calculate angles from the direction vector
+        vertical_angle = np.degrees(np.arctan2(
+            np.linalg.norm(np.cross([0, 1, 0], [0, pedicle_direction[1], pedicle_direction[2]])),
+            np.dot([0, 1, 0], [0, pedicle_direction[1], pedicle_direction[2]])
+        ))
+        
+        horizontal_angle = np.degrees(np.arctan2(
+            np.linalg.norm(np.cross([0, 1, 0], [pedicle_direction[0], pedicle_direction[1], 0])),
+            np.dot([0, 1, 0], [pedicle_direction[0], pedicle_direction[1], 0])
+        ))
+        
+        # Ensure proper sign for the angles
+        if pedicle_direction[2] < 0:
+            vertical_angle = -vertical_angle
+        if pedicle_direction[0] < 0:
+            horizontal_angle = -horizontal_angle
+            
+        return pedicle_direction, (vertical_angle, horizontal_angle)
 
     def onEntry(self, comingFrom, transitionType):
 
