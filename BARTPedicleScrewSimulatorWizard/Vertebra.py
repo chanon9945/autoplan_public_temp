@@ -2,7 +2,7 @@ import numpy as np
 import scipy as sp
 import vtk
 from vtkmodules.util import numpy_support
-from PCAUtils import *
+from .PCAUtils import *
 
 imageMath = vtk.vtkImageMathematics()
 
