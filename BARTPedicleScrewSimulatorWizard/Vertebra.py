@@ -331,7 +331,7 @@ class Vertebra:
         self.centroid = get_masked_centroid(self.maskedVolume)
 
         shifted_x, shifted_y = centroid_shift(self.centroid[0],self.centroid[1],self.centroid[2],self.mask)
-        spinal_canal, stack_x, stack_y = floodfill(self.mask[:,:,self.centroid[2]],shifted_x,shifted_y)
+        self.spinal_canal, stack_x, stack_y = floodfill(self.mask[:,:,self.centroid[2]],shifted_x,shifted_y)
         canal_max_y = np.max(stack_y)
         canal_min_y = np.min(stack_y)
         canal_center, canal_center_x, canal_center_y = center(self.spinal_canal)
