@@ -203,42 +203,67 @@ class LoadDataStep(PedicleScrewSimulatorStep):
       super(LoadDataStep, self).onExit(goingTo, transitionType)
 
     def doStepProcessing(self):
-      coords = [0,0,0]
-      coords = self.__baseline.GetOrigin()
-
-      transformVolmat = vtk.vtkMatrix4x4()
-      transformVolmat.SetElement(0,3,coords[0]*-1)
-      transformVolmat.SetElement(1,3,coords[1]*-1)
-      transformVolmat.SetElement(2,3,coords[2]*-1)
-
-      transformVol = slicer.vtkMRMLLinearTransformNode()
-      slicer.mrmlScene.AddNode(transformVol)
-      transformVol.ApplyTransformMatrix(transformVolmat)
-
-      self.__baseline.SetAndObserveTransformNodeID(transformVol.GetID())
+      # First, translate volume so its origin is at (0,0,0)
+      volume_origin = self.__baseline.GetOrigin()
+      logging.debug(f"Original volume origin: {volume_origin}")
+      
+      # Create first transform to move origin to (0,0,0)
+      transform_matrix1 = vtk.vtkMatrix4x4()
+      transform_matrix1.Identity()
+      transform_matrix1.SetElement(0, 3, -volume_origin[0])  # Negate for translation
+      transform_matrix1.SetElement(1, 3, -volume_origin[1])
+      transform_matrix1.SetElement(2, 3, -volume_origin[2])
+      
+      transform_node1 = slicer.vtkMRMLLinearTransformNode()
+      transform_node1.SetName("OriginTransform")
+      slicer.mrmlScene.AddNode(transform_node1)
+      transform_node1.SetMatrixTransformToParent(transform_matrix1)
+      
+      # Apply first transform
+      self.__baseline.SetAndObserveTransformNodeID(transform_node1.GetID())
       slicer.vtkSlicerTransformLogic.hardenTransform(self.__baseline)
-
-      newCoords = [0,0,0,0,0,0]
-      self.__baseline.GetRASBounds(newCoords)
-      logging.debug(newCoords)
-      shift = [0,0,0]
-      shift[0] = 0.5*(newCoords[1] - newCoords[0])
-      shift[1] = 0.5*(newCoords[3] - newCoords[2])
-      shift[2] = 0.5*(newCoords[4] - newCoords[5])
-
-      transformVolmat2 = vtk.vtkMatrix4x4()
-      transformVolmat2.SetElement(0,3,shift[0])
-      transformVolmat2.SetElement(1,3,shift[1])
-      transformVolmat2.SetElement(2,3,shift[2])
-
-      transformVol2 = slicer.vtkMRMLLinearTransformNode()
-      slicer.mrmlScene.AddNode(transformVol2)
-      transformVol2.ApplyTransformMatrix(transformVolmat2)
-
-      self.__baseline.SetAndObserveTransformNodeID(transformVol2.GetID())
+      
+      # Now get the bounds of the volume to determine its center
+      bounds = [0, 0, 0, 0, 0, 0]
+      self.__baseline.GetBounds(bounds)
+      logging.debug(f"Volume bounds after origin translation: {bounds}")
+      
+      # Calculate center of the volume
+      center = [
+          (bounds[1] + bounds[0]) / 2.0,
+          (bounds[3] + bounds[2]) / 2.0,
+          (bounds[5] + bounds[4]) / 2.0
+      ]
+      logging.debug(f"Volume center: {center}")
+      
+      # Create second transform to center the volume at the origin
+      transform_matrix2 = vtk.vtkMatrix4x4()
+      transform_matrix2.Identity()
+      transform_matrix2.SetElement(0, 3, -center[0])
+      transform_matrix2.SetElement(1, 3, -center[1])
+      transform_matrix2.SetElement(2, 3, -center[2])
+      
+      transform_node2 = slicer.vtkMRMLLinearTransformNode()
+      transform_node2.SetName("CenteringTransform")
+      slicer.mrmlScene.AddNode(transform_node2)
+      transform_node2.SetMatrixTransformToParent(transform_matrix2)
+      
+      # Apply second transform
+      self.__baseline.SetAndObserveTransformNodeID(transform_node2.GetID())
       slicer.vtkSlicerTransformLogic.hardenTransform(self.__baseline)
-
-      slicer.mrmlScene.RemoveNode(transformVol)
-      slicer.mrmlScene.RemoveNode(transformVol2)
-
-      logging.debug('Done')
+      
+      # Verify the new bounds
+      final_bounds = [0, 0, 0, 0, 0, 0]
+      self.__baseline.GetBounds(final_bounds)
+      final_center = [
+          (final_bounds[1] + final_bounds[0]) / 2.0,
+          (final_bounds[3] + final_bounds[2]) / 2.0,
+          (final_bounds[5] + final_bounds[4]) / 2.0
+      ]
+      logging.debug(f"Final volume center: {final_center}")
+      
+      # Clean up transform nodes
+      slicer.mrmlScene.RemoveNode(transform_node1)
+      slicer.mrmlScene.RemoveNode(transform_node2)
+      
+      logging.debug('Volume centering completed')
