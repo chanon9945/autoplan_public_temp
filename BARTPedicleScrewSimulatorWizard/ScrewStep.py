@@ -1183,7 +1183,6 @@ class ScrewStep(PedicleScrewSimulatorStep):
                         resolution=200,  # Lower resolution for faster results
                         reach=100,
                         weight=[300, 1, 30, 0.05],
-                        n_jobs=4,  # Use a fixed number of workers
                         progress_callback=progress_callback
                     )
                 else:
