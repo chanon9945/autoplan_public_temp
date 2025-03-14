@@ -63,12 +63,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
       self.timer2.connect('timeout()', self.reverseScrew)
       self.screwInsert = 0.0
 
-      #Autoplanner parameters
       self.autoPlanner = None
-      self.resolution = 1000
-      self.reach = 100
-      self.weight = [300, 1, 30, 0.05]
-
 
     def killButton(self):
       bl = slicer.util.findChildren(text='Final')
@@ -1087,7 +1082,19 @@ class ScrewStep(PedicleScrewSimulatorStep):
         slicer.app.processEvents()
         
         try:
+            # Install joblib if not already installed
+            try:
+                import joblib
+            except ImportError:
+                progressDialog.setLabelText("Installing required packages...")
+                slicer.util.pip_install("joblib")
+                import joblib
+            
             # Create a temporary labelmap node
+            progressDialog.setLabelText("Exporting segmentation...")
+            progressDialog.setValue(15)
+            slicer.app.processEvents()
+            
             labelmapNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "TempLabelmap")
             
             # Export ALL segments to the labelmap
@@ -1098,16 +1105,8 @@ class ScrewStep(PedicleScrewSimulatorStep):
                 progressDialog.close()
                 qt.QMessageBox.warning(None, "Warning", "No segments found in segmentation.")
                 return
-                
-            # Log all available segments to help with debugging
-            logging.info(f"Available segments ({segmentIDs.GetNumberOfValues()}):")
-            for i in range(segmentIDs.GetNumberOfValues()):
-                segID = segmentIDs.GetValue(i)
-                segName = segmentation.GetSegmentation().GetSegment(segID).GetName()
-                logging.info(f"  {i+1}: ID={segID}, Name={segName}")
             
-            # Export segments to labelmap - FIX: use correct method signature
-            # For Slicer 5.6.2, we need to use a different approach
+            # Export segments to labelmap
             segmentationLogic = slicer.modules.segmentations.logic()
             
             # Create a segmentation export node to handle the conversion
@@ -1132,58 +1131,97 @@ class ScrewStep(PedicleScrewSimulatorStep):
                 qt.QMessageBox.warning(None, "Warning", "Failed to export segmentation to labelmap.")
                 return
             
-            progressDialog.setValue(30)
+            progressDialog.setValue(20)
             slicer.app.processEvents()
             
-            # Get the image data
-            labelMapVolumeData = labelmapNode.GetImageData()
-            inputVolumeData = inputVolume.GetImageData()
-            
             # Create the Vertebra object
+            progressDialog.setLabelText("Processing vertebra geometry...")
+            slicer.app.processEvents()
+            
             from .Vertebra import Vertebra
             insertion_coords = [0, 0, 0]
             self.fidNode.GetNthControlPointPosition(self.currentFidIndex, insertion_coords)
             
             try:
+                # Get the image data
+                labelMapVolumeData = labelmapNode.GetImageData()
+                inputVolumeData = inputVolume.GetImageData()
+                
                 vertebra = Vertebra(labelMapVolumeData, inputVolumeData, insertion_coords)
-                progressDialog.setValue(50)
+                progressDialog.setValue(30)
                 slicer.app.processEvents()
                 
                 # Initialize auto planner if not already done
-                if not self.autoPlanner:
-                    from .AutoPlanner import PedicleScrewAutoPlanner
-                    self.autoPlanner = PedicleScrewAutoPlanner(
-                        resolution=200,  # Start with lower resolution for faster results
-                        reach=100,
-                        weight=[300, 1, 30, 0.05]
-                    )
-                
-                progressDialog.setValue(60)
+                progressDialog.setLabelText("Initializing trajectory planner...")
                 slicer.app.processEvents()
                 
-                # Run the trajectory planning
-                logging.info(f"Running auto planning for insertion point {insertion_coords}")
-                
-                # Check if progress dialog was canceled
-                if progressDialog.wasCanceled:
-                    # Fix: wasCanceled is a property in some Qt versions, not a method
-                    if callable(progressDialog.wasCanceled):
-                        if progressDialog.wasCanceled():
-                            slicer.mrmlScene.RemoveNode(labelmapNode)
-                            return
-                    else:
-                        if progressDialog.wasCanceled:
-                            slicer.mrmlScene.RemoveNode(labelmapNode)
-                            return
+                if not self.autoPlanner:
+                    from .AutoPlanner import PedicleScrewAutoPlanner
                     
+                    # Create a custom progress update callback
+                    def progress_callback(phase, iteration, max_iterations):
+                        if phase == 1:  # First joint search
+                            # Map progress from 0-100% of first phase to 40-60% of overall progress
+                            progress = 40 + (iteration / max_iterations) * 20
+                        else:  # Second joint search
+                            # Map progress from 0-100% of second phase to 60-90% of overall progress
+                            progress = 60 + (iteration / max_iterations) * 30
+                        
+                        progressDialog.setValue(int(progress))
+                        progressDialog.setLabelText(f"Searching {phase}/2: {iteration}/{max_iterations}")
+                        slicer.app.processEvents()
+                        
+                        # Check for cancel button
+                        if hasattr(progressDialog, 'wasCanceled'):
+                            if callable(progressDialog.wasCanceled):
+                                return progressDialog.wasCanceled()
+                            else:
+                                return progressDialog.wasCanceled
+                        return False
+                    
+                    self.autoPlanner = PedicleScrewAutoPlanner(
+                        resolution=200,  # Lower resolution for faster results
+                        reach=100,
+                        weight=[300, 1, 30, 0.05],
+                        n_jobs=4,  # Use a fixed number of workers
+                        progress_callback=progress_callback
+                    )
+                else:
+                    # Update the existing auto planner's progress callback
+                    def progress_callback(phase, iteration, max_iterations):
+                        if phase == 1:  # First joint search
+                            progress = 40 + (iteration / max_iterations) * 20
+                        else:  # Second joint search
+                            progress = 60 + (iteration / max_iterations) * 30
+                        
+                        progressDialog.setValue(int(progress))
+                        progressDialog.setLabelText(f"Searching {phase}/2: {iteration}/{max_iterations}")
+                        slicer.app.processEvents()
+                        
+                        # Check for cancel button
+                        if hasattr(progressDialog, 'wasCanceled'):
+                            if callable(progressDialog.wasCanceled):
+                                return progressDialog.wasCanceled()
+                            else:
+                                return progressDialog.wasCanceled
+                        return False
+                    
+                    self.autoPlanner.progress_callback = progress_callback
+                
+                # Run the trajectory planning
+                progressDialog.setValue(40)
+                progressDialog.setLabelText("Searching for optimal trajectory (phase 1/2)...")
+                slicer.app.processEvents()
+                
                 # Run the actual planning
                 _, angles, _ = self.autoPlanner.plan_trajectory(vertebra, insertion_coords)
                 vertical_angle, horizontal_angle = angles
                 
-                progressDialog.setValue(90)
+                # Apply angles to the sliders
+                progressDialog.setValue(95)
+                progressDialog.setLabelText("Finalizing results...")
                 slicer.app.processEvents()
                 
-                # Apply angles to the sliders
                 logging.info(f"Setting angles: Vertical = {vertical_angle}°, Horizontal = {horizontal_angle}°")
                 self.transformSlider1.setValue(vertical_angle)
                 self.transformSlider2.setValue(horizontal_angle)
@@ -1208,12 +1246,12 @@ class ScrewStep(PedicleScrewSimulatorStep):
             logging.error(traceback.format_exc())
             progressDialog.close()
             qt.QMessageBox.critical(None, "Error", f"Auto-planning failed: {str(e)}")
-        
+    
         finally:
             progressDialog.close()
             if 'labelmapNode' in locals() and labelmapNode is not None:
                 slicer.mrmlScene.RemoveNode(labelmapNode)
-    
+
     def initializeAutoPlanner(self):
         """Initialize the auto-planning components"""
         logging.debug("Initializing auto-planner...")
