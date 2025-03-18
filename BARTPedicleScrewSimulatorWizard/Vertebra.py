@@ -6,754 +6,606 @@ import logging
 import slicer
 
 class Vertebra:
-    def __init__(self, mask, volume, insertion_point):
+    """
+    Class representing a vertebra for pedicle screw trajectory planning.
+    Handles coordinate transforms, segmentation processing, and anatomical analysis.
+    """
+    
+    def __init__(self, segmentation_node, volume_node, insertion_point):
         """
-        Initialize a Vertebra object for pedicle screw trajectory planning.
+        Initialize a Vertebra object from segmentation and volume nodes.
         
         Parameters:
-            mask: vtkImageData representing the binary mask of the vertebra
-            volume: vtkImageData representing the CT intensity values
-            insertion_point: [x, y, z] coordinates of the surgeon-specified insertion point
+            segmentation_node: vtkMRMLSegmentationNode or vtkMRMLLabelMapVolumeNode
+            volume_node: vtkMRMLScalarVolumeNode containing CT intensities
+            insertion_point: [x, y, z] coordinates of surgeon-specified insertion point
         """
-        self.mask = mask
-        self.volume = volume
+        self.logger = logging.getLogger(__name__)
         self.insertion_point = np.array(insertion_point)
         
-        # Set up logging for debugging
-        self.logger = logging.getLogger(__name__)
-        
         try:
-            # Convert VTK volumes to NumPy arrays for processing
-            self.mask_array = self._vtk_to_numpy_3d(mask)
-            self.volume_array = self._vtk_to_numpy_3d(volume)
-            
-            # Multiply volume by mask to get masked volume
-            self.masked_volume_array = self.volume_array * self.mask_array
-            self.maskedVolume = self._numpy_to_vtk_3d(self.masked_volume_array, self.volume)
-            
-            # Calculate centroid of masked volume
-            self.centroid = self._get_masked_centroid(self.masked_volume_array)
-            
-            # Add the debug call here
-            self.debug_centroid_calculation(self.mask_array, volume)
-            
-            if self.centroid is None:
-                raise ValueError("Failed to compute centroid - masked volume may be empty")
-                
-            # Process spinal canal
-            centroid_slice_z = int(self.centroid[2])
-            mask_slice = self.mask_array[:, :, centroid_slice_z].copy()
-            
-            # Find a point inside the spinal canal
-            shifted_x, shifted_y = self._centroid_shift(
-                int(self.centroid[0]), 
-                int(self.centroid[1]),
-                centroid_slice_z, 
-                self.mask_array
-            )
-            
-            # Floodfill to find spinal canal
-            self.spinal_canal, stack_x, stack_y = self._floodfill(
-                mask_slice, 
-                shifted_x, 
-                shifted_y
-            )
-            
-            # Find canal boundaries
-            if len(stack_y) > 0:
-                canal_max_y = np.max(stack_y)
-                canal_min_y = np.min(stack_y)
+            # Create temporary labelmap if segmentation_node is a segmentation
+            temp_labelmap_node = None
+            if hasattr(segmentation_node, 'GetClassName'):
+                class_name = segmentation_node.GetClassName()
+                if 'vtkMRMLSegmentationNode' in class_name:
+                    self.logger.info("Converting segmentation to labelmap")
+                    temp_labelmap_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "TempLabelmap")
+                    
+                    # Export visible segments to the labelmap
+                    success = slicer.modules.segmentations.logic().ExportVisibleSegmentsToLabelmapNode(
+                        segmentation_node, temp_labelmap_node, volume_node)
+                    
+                    if not success:
+                        self.logger.error("Failed to export segmentation to labelmap")
+                        raise RuntimeError("Segmentation export failed")
+                    
+                    # Use the temporary labelmap for processing
+                    self.mask_node = temp_labelmap_node
+                else:
+                    # It's already a labelmap or other type
+                    self.mask_node = segmentation_node
             else:
-                # Fallback if spinal canal not found
-                canal_max_y = int(self.centroid[1]) 
-                canal_min_y = int(self.centroid[1]) - 20
+                # Assume it's a data object (not a MRML node)
+                self.mask_node = segmentation_node
             
-            # Cut pedicle using canal boundaries
+            # Check volume node type
+            if hasattr(volume_node, 'GetClassName'):
+                class_name = volume_node.GetClassName()
+                self.logger.info(f"Volume node class: {class_name}")
+                
+                # If it's a MRML volume node, we're good
+                if 'vtkMRMLVolumeNode' in class_name:
+                    self.volume_node = volume_node
+                else:
+                    # It's probably a vtkImageData, not a volume node
+                    self.logger.warning(f"Expected vtkMRMLVolumeNode but got {class_name}")
+                    # We'll still use it, but some operations may fail
+                    self.volume_node = volume_node
+            else:
+                # Assume it's a vtkImageData or similar
+                self.logger.warning("Volume node doesn't have GetClassName method")
+                self.volume_node = volume_node
+            
+            # Convert nodes to numpy arrays for processing
+            self.mask_array = self._volume_to_numpy_array(self.mask_node)
+            self.volume_array = self._volume_to_numpy_array(self.volume_node)
+            
+            # Create masked volume (volume × mask)
+            self.masked_volume_array = self.volume_array * (self.mask_array > 0).astype(float)
+            
+            # Make masked volume available to other components
+            self.maskedVolume = self._numpy_to_volume(self.masked_volume_array, self.volume_node)
+            
+            # Calculate centroid of the vertebra
+            self.centroid = self._calculate_centroid(self.mask_array)
+            self.logger.info(f"Vertebra centroid: {self.centroid}")
+            
+            # Find spinal canal
+            canal_min_y, canal_max_y = self._detect_spinal_canal()
+            
+            # Cut out pedicle region
             self.pedicle_array = self._cut_pedicle(
                 self.masked_volume_array.copy(), 
                 canal_max_y, 
                 canal_min_y, 
-                15, 1
+                buffer_front=15,
+                buffer_end=1
             )
             
-            self.pedicle_mask_array = self._cut_pedicle(
-                self.mask_array.copy(), 
-                canal_max_y, 
-                canal_min_y, 
-                15, 1
-            )
-            
-            # Convert processed arrays back to VTK objects
-            self.pedicle = self._numpy_to_vtk_3d(self.pedicle_array, self.maskedVolume)
-            self.pedicle_mask = self._numpy_to_vtk_3d(self.pedicle_mask_array, self.mask)
-            
-            # Cut pedicle based on ROI point
-            self.pedicle_roi_array = self._pedicle_roi_cut(
+            # Separate relevant side (left/right based on insertion point)
+            self.pedicle_roi_array = self._cut_pedicle_side(
                 self.pedicle_array.copy(),
                 self.insertion_point[0],
                 self.centroid[0]
             )
             
-            self.pedicle_roi_mask_array = self._pedicle_roi_cut(
-                self.pedicle_mask_array.copy(),
-                self.insertion_point[0],
-                self.centroid[0]
+            # Create point cloud for the pedicle
+            self.pedicle_point_cloud = self._array_to_point_cloud(
+                self.pedicle_roi_array, 
+                self.volume_node,
+                threshold=0
             )
             
-            # Convert to VTK
-            self.pedicle_roi = self._numpy_to_vtk_3d(self.pedicle_roi_array, self.maskedVolume)
-            self.pedicle_roi_mask = self._numpy_to_vtk_3d(self.pedicle_roi_mask_array, self.mask)
-            
-            # Create point cloud and run PCA
-            self.pedicle_point_cloud = self._masked_volume_to_point_cloud(self.pedicle_roi_mask)
-            
-            # Initialize default PCA vectors (identity matrix)
-            self.pcaVectors = np.eye(3)
-            
+            # Perform PCA on pedicle points
             if self.pedicle_point_cloud and self.pedicle_point_cloud.GetNumberOfPoints() > 0:
-                # Convert VTK point cloud to numpy array for PCA
-                points_array = self._vtk_points_to_numpy(self.pedicle_point_cloud.GetPoints())
-                
-                if points_array.shape[0] >= 3:  # Need at least 3 points for meaningful PCA
-                    try:
-                        coeff, latent, score = apply_pca(points_array)
-                        self.pedicle_center_point = np.mean(points_array, axis=0)
-                        scaling_factor = np.sqrt(latent) * 2
-                        self.pcaVectors = coeff * scaling_factor[:, np.newaxis]
-                    except Exception as e:
-                        self.logger.error(f"PCA failed: {str(e)}")
+                points_array = self._points_to_numpy(self.pedicle_point_cloud.GetPoints())
+                if points_array.shape[0] >= 3:
+                    # Run PCA
+                    self.coeff, self.latent, self.score = apply_pca(points_array)
+                    self.pedicle_center_point = np.mean(points_array, axis=0)
+                    
+                    # Scale eigenvectors by eigenvalues for visualization
+                    scaling_factor = np.sqrt(self.latent) * 2
+                    self.pcaVectors = self.coeff * scaling_factor[:, np.newaxis]
+                    self.logger.info(f"PCA principal axis: {self.pcaVectors[:, 2]}")
+                else:
+                    self.logger.warning(f"Not enough points for PCA: {points_array.shape}")
+                    self._set_default_values()
+            else:
+                self.logger.warning("No pedicle point cloud available for PCA")
+                self._set_default_values()
             
-            # Extract surface voxels
+            # Extract surface points for collision detection
             self.surface_array = self._extract_surface_voxels(self.mask_array)
-            self.surface = self._numpy_to_vtk_3d(self.surface_array, self.mask)
-            self.point_cloud = self._masked_volume_to_point_cloud(self.surface)
+            self.point_cloud = self._array_to_point_cloud(
+                self.surface_array,
+                self.volume_node,
+                threshold=0
+            )
             
+            # Clean up temporary node
+            if temp_labelmap_node:
+                slicer.mrmlScene.RemoveNode(temp_labelmap_node)
+                
         except Exception as e:
-            self.logger.error(f"Vertebra initialization error: {str(e)}")
+            self.logger.error(f"Error initializing Vertebra: {str(e)}")
             import traceback
             self.logger.error(traceback.format_exc())
             
-            # Set fallback values for critical properties
-            self.centroid = np.array(insertion_point)
-            self.mask_array = np.zeros((1, 1, 1))
-            self.volume_array = np.zeros((1, 1, 1))
-            self.masked_volume_array = np.zeros((1, 1, 1))
-            self.maskedVolume = vtk.vtkImageData()
-            self.spinal_canal = np.zeros((1, 1))
-            self.pedicle_array = np.zeros((1, 1, 1))
-            self.pedicle_mask_array = np.zeros((1, 1, 1))
-            self.pedicle = vtk.vtkImageData()
-            self.pedicle_mask = vtk.vtkImageData()
-            self.pedicle_roi_array = np.zeros((1, 1, 1))
-            self.pedicle_roi_mask_array = np.zeros((1, 1, 1))
-            self.pedicle_roi = vtk.vtkImageData()
-            self.pedicle_roi_mask = vtk.vtkImageData()
-            self.pedicle_point_cloud = vtk.vtkPolyData()
-            self.pcaVectors = np.eye(3)
-            self.pedicle_center_point = np.array(insertion_point)
-            self.surface_array = np.zeros((1, 1, 1))
-            self.surface = vtk.vtkImageData()
-            self.point_cloud = vtk.vtkPolyData()
+            # Set default values on error
+            self._set_default_values()
+            
+            # Re-raise for caller
             raise
+    
+    def _set_default_values(self):
+        """Set default values when processing fails"""
+        if not hasattr(self, 'centroid') or self.centroid is None:
+            self.centroid = self.insertion_point
+            
+        if not hasattr(self, 'pcaVectors') or self.pcaVectors is None:
+            self.pcaVectors = np.eye(3)
+            
+        if not hasattr(self, 'pedicle_center_point') or self.pedicle_center_point is None:
+            self.pedicle_center_point = self.insertion_point
 
-    def debug_centroid_calculation(self, mask_array, volume_node):
+    def _volume_to_numpy_array(self, volume_node):
         """
-        Debug function to investigate centroid calculation issues
-        """
-        # 1. Get dimensions and shape information
-        dims = mask_array.shape
-        self.logger.info(f"Mask array shape: {dims}")
+        Convert a volume node to a numpy array, handling coordinate transforms.
         
-        # 2. Count non-zero voxels in the mask
-        non_zero_count = np.count_nonzero(mask_array)
-        self.logger.info(f"Non-zero voxels in mask: {non_zero_count}")
-        
-        # 3. Calculate the centroid in index space
-        indices = np.where(mask_array > 0)
-        if len(indices[0]) == 0:
-            self.logger.warning("No non-zero voxels for centroid calculation")
-            return
+        Parameters:
+            volume_node: vtkMRMLVolumeNode
             
-        centroid_i = np.mean(indices[0])
-        centroid_j = np.mean(indices[1])
-        centroid_k = np.mean(indices[2])
-        self.logger.info(f"Centroid in IJK coords: [{centroid_i}, {centroid_j}, {centroid_k}]")
-        
-        # 4. Check transformations
-        if volume_node:
-            # Print volume node information
-            spacing = volume_node.GetSpacing()
-            origin = volume_node.GetOrigin()
-            self.logger.info(f"Volume spacing: {spacing}")
-            self.logger.info(f"Volume origin: {origin}")
-            
-            # Get transformation matrices
-            ijk_to_ras = vtk.vtkMatrix4x4()
-            volume_node.GetIJKToRASMatrix(ijk_to_ras)
-            
-            # Print matrix elements for debugging
-            matrix_elements = [[ijk_to_ras.GetElement(i, j) for j in range(4)] for i in range(4)]
-            self.logger.info(f"IJK to RAS matrix: {matrix_elements}")
-            
-            # Convert IJK to RAS
-            ras_coords = [0, 0, 0, 1]
-            ijk_coords = [centroid_i, centroid_j, centroid_k, 1]
-            ijk_to_ras.MultiplyPoint(ijk_coords, ras_coords)
-            self.logger.info(f"Centroid in RAS coords: [{ras_coords[0]}, {ras_coords[1]}, {ras_coords[2]}]")
-            
-            # Check volume bounds
-            bounds = [0, 0, 0, 0, 0, 0]
-            volume_node.GetRASBounds(bounds)
-            self.logger.info(f"Volume RAS bounds: {bounds}")
-            
-            # Check if centroid is inside bounds
-            inside_x = bounds[0] <= ras_coords[0] <= bounds[1]
-            inside_y = bounds[2] <= ras_coords[1] <= bounds[3]
-            inside_z = bounds[4] <= ras_coords[2] <= bounds[5]
-            self.logger.info(f"Centroid inside bounds: x={inside_x}, y={inside_y}, z={inside_z}")
-
-    def _find_segment_for_level(self, segmentation_node, level):
-        """Find the segment ID for a specific vertebra level"""
-        if not segmentation_node:
-            return None
-            
-        segmentation = segmentation_node.GetSegmentation()
-        for i in range(segmentation.GetNumberOfSegments()):
-            segment_id = segmentation.GetNthSegmentID(i)
-            segment = segmentation.GetSegment(segment_id)
-            segment_name = segment.GetName().lower()
-            
-            # Check if this segment matches the level
-            # This needs to be adjusted based on your segment naming convention
-            if level.lower() in segment_name or f"{level} vertebra".lower() in segment_name:
-                return segment_id
-                
-        return None
-
-    def _vtk_to_numpy_3d(self, vtk_image):
+        Returns:
+            numpy.ndarray: 3D array of voxel values
         """
-        Convert vtkImageData or vtkMRMLVolumeNode to 3D numpy array with proper handling
-        of both node types and error conditions.
-        """
-        if vtk_image is None:
-            self.logger.warning("Empty VTK image provided")
+        if not volume_node:
+            self.logger.warning("Empty volume node")
             return np.zeros((1, 1, 1))
         
-        # Determine if this is a MRML node or direct vtkImageData
+        # Get image data
         image_data = None
-        if hasattr(vtk_image, 'GetClassName'):
-            class_name = vtk_image.GetClassName()
-            
-            # For MRML volume nodes, get the underlying image data
-            if 'vtkMRMLVolumeNode' in class_name or 'vtkMRMLLabelMapVolumeNode' in class_name:
-                image_data = vtk_image.GetImageData()
-                if image_data is None:
-                    self.logger.warning(f"{class_name} has no image data")
-                    return np.zeros((1, 1, 1))
-            elif 'vtkImageData' in class_name:
-                # It's already a vtkImageData
-                image_data = vtk_image
-            else:
-                self.logger.warning(f"Unsupported input type: {class_name}")
-                return np.zeros((1, 1, 1))
+        if hasattr(volume_node, 'GetImageData'):
+            image_data = volume_node.GetImageData()
         else:
-            # If no GetClassName method, assume it's a vtkImageData
-            # (less safe but accommodates different VTK Python wrappings)
-            image_data = vtk_image
-        
-        # Now process the vtkImageData
-        try:
-            dims = image_data.GetDimensions()
-            if 0 in dims:
-                self.logger.warning(f"VTK image has zero dimension: {dims}")
-                return np.zeros((1, 1, 1))
-                
-            point_data = image_data.GetPointData()
-            if not point_data:
-                self.logger.warning("VTK image has no point data")
-                return np.zeros(dims[::-1])
-                
-            scalar_data = point_data.GetScalars()
-            if not scalar_data:
-                self.logger.warning("VTK image has no scalar data")
-                return np.zeros(dims[::-1])
-                
-            # Convert to numpy array
-            from vtkmodules.util import numpy_support
-            numpy_data = numpy_support.vtk_to_numpy(scalar_data)
-            
-            # VTK stores data in [z,y,x] order, but we want [x,y,z]
-            reshaped_data = numpy_data.reshape(dims[2], dims[1], dims[0])
-            return reshaped_data.transpose(2, 1, 0)  # Transpose to [x,y,z]
-        except Exception as e:
-            self.logger.error(f"Failed to convert VTK data to numpy: {str(e)}")
-            if hasattr(image_data, 'GetDimensions'):
-                try:
-                    dims = image_data.GetDimensions()
-                    return np.zeros(dims[::-1])
-                except:
-                    pass
+            self.logger.warning("Volume node has no GetImageData method")
             return np.zeros((1, 1, 1))
-
-    def _numpy_to_vtk_3d(self, numpy_array, reference_vtk=None):
+        
+        if not image_data:
+            self.logger.warning("No image data in volume node")
+            return np.zeros((1, 1, 1))
+        
+        # Get dimensions
+        dims = image_data.GetDimensions()
+        if 0 in dims:
+            self.logger.warning(f"Volume has zero dimension: {dims}")
+            return np.zeros((1, 1, 1))
+        
+        # Get scalars
+        scalars = image_data.GetPointData().GetScalars()
+        if not scalars:
+            self.logger.warning("No scalar data in volume")
+            return np.zeros(dims[::-1])
+        
+        # Convert to numpy array
+        numpy_array = numpy_support.vtk_to_numpy(scalars)
+        
+        # Reshape to 3D array (VTK's order is [z,y,x], we want [x,y,z])
+        reshaped_array = numpy_array.reshape(dims[2], dims[1], dims[0])
+        
+        # Transpose to match our expected order
+        return reshaped_array.transpose(2, 1, 0)
+    
+    def _numpy_to_volume(self, numpy_array, reference_node):
         """
-        Convert 3D numpy array to vtkImageData with proper handling of reference
-        objects that may be either MRML nodes or direct vtkImageData.
+        Convert a numpy array to a vtkMRMLScalarVolumeNode.
+        
+        Parameters:
+            numpy_array: 3D numpy array
+            reference_node: Node to copy geometry from
+            
+        Returns:
+            vtkMRMLScalarVolumeNode: Volume node containing the data
         """
         if numpy_array is None or numpy_array.size == 0:
             self.logger.warning("Empty numpy array provided")
-            return vtk.vtkImageData()
-        
-        # Create output VTK image
-        vtk_image = vtk.vtkImageData()
-        
-        # Extract image properties from reference if available
-        if reference_vtk is not None:
-            # Determine if reference is a MRML node or direct vtkImageData
-            ref_image_data = None
-            ref_spacing = [1.0, 1.0, 1.0]
-            ref_origin = [0.0, 0.0, 0.0]
-            
-            if hasattr(reference_vtk, 'GetClassName'):
-                class_name = reference_vtk.GetClassName()
-                
-                # Handle MRML volume nodes
-                if 'vtkMRMLVolumeNode' in class_name or 'vtkMRMLLabelMapVolumeNode' in class_name:
-                    ref_image_data = reference_vtk.GetImageData()
-                    ref_spacing = reference_vtk.GetSpacing()
-                    ref_origin = reference_vtk.GetOrigin()
-                
-                # Handle direct vtkImageData
-                elif 'vtkImageData' in class_name:
-                    ref_image_data = reference_vtk
-                    ref_spacing = reference_vtk.GetSpacing()
-                    ref_origin = reference_vtk.GetOrigin()
-            else:
-                # Assume it's a vtkImageData if no GetClassName
-                ref_image_data = reference_vtk
-                if hasattr(reference_vtk, 'GetSpacing'):
-                    ref_spacing = reference_vtk.GetSpacing()
-                if hasattr(reference_vtk, 'GetOrigin'):
-                    ref_origin = reference_vtk.GetOrigin()
-            
-            # Apply properties to output image
-            if ref_image_data and hasattr(ref_image_data, 'GetDimensions'):
-                vtk_image.SetDimensions(ref_image_data.GetDimensions())
-            else:
-                vtk_image.SetDimensions(numpy_array.shape)
-                
-            vtk_image.SetSpacing(ref_spacing)
-            vtk_image.SetOrigin(ref_origin)
-            
-            # Direction matrix handling is removed to prevent errors
-        else:
-            # No reference provided, use array shape
-            vtk_image.SetDimensions(numpy_array.shape[0], numpy_array.shape[1], numpy_array.shape[2])
-            vtk_image.SetSpacing(1.0, 1.0, 1.0)
-            vtk_image.SetOrigin(0.0, 0.0, 0.0)
-        
-        try:
-            # Transpose numpy array from [x,y,z] to [z,y,x] for VTK
-            numpy_array_t = numpy_array.transpose(2, 1, 0).copy()
-            flat_array = numpy_array_t.ravel()
-            
-            # Create VTK array and set as image scalars
-            from vtkmodules.util import numpy_support
-            vtk_array = numpy_support.numpy_to_vtk(
-                flat_array, 
-                deep=True,
-                array_type=vtk.VTK_FLOAT
-            )
-            vtk_image.GetPointData().SetScalars(vtk_array)
-            
-            return vtk_image
-        except Exception as e:
-            self.logger.error(f"Error in _numpy_to_vtk_3d: {str(e)}")
-            return vtk.vtkImageData()
-    
-    def _get_masked_centroid(self, masked_volume_array, threshold=0):
-        """
-        Compute the centroid of nonzero voxels in a masked volume.
-        Returns [x, y, z] coordinates in physical space.
-        """
-        try:
-            # Find indices where the value is above threshold
-            indices = np.where(masked_volume_array > threshold)
-            
-            if len(indices[0]) == 0:
-                self.logger.warning("No voxels above threshold found for centroid calculation")
-                return None
-                
-            # Calculate centroid in index space
-            centroid_i = np.mean(indices[0])
-            centroid_j = np.mean(indices[1])
-            centroid_k = np.mean(indices[2])
-            
-            # Convert to physical coordinates based on available information
-            if hasattr(self, 'volume') and self.volume is not None:
-                # Determine if this is a MRML node or direct vtkImageData
-                if hasattr(self.volume, 'GetClassName'):
-                    class_name = self.volume.GetClassName()
-                    
-                    # Handle MRML volume nodes
-                    if 'vtkMRMLVolumeNode' in class_name or 'vtkMRMLLabelMapVolumeNode' in class_name:
-                        # Use the transformation matrix
-                        ijk_to_ras = vtk.vtkMatrix4x4()
-                        self.volume.GetIJKToRASMatrix(ijk_to_ras)
-                        
-                        # Convert IJK coordinates to RAS
-                        ras_coords = [0, 0, 0, 1]  # Homogeneous coordinates
-                        ijk_point = [centroid_i, centroid_j, centroid_k, 1]
-                        ijk_to_ras.MultiplyPoint(ijk_point, ras_coords)
-                        
-                        return [ras_coords[0], ras_coords[1], ras_coords[2]]
-                    
-                    # Handle direct vtkImageData
-                    elif 'vtkImageData' in class_name:
-                        spacing = self.volume.GetSpacing()
-                        origin = self.volume.GetOrigin()
-                        
-                        # Simple coordinate transformation
-                        x = origin[0] + centroid_i * spacing[0]
-                        y = origin[1] + centroid_j * spacing[1]
-                        z = origin[2] + centroid_k * spacing[2]
-                        
-                        return [x, y, z]
-                
-                # As a fallback, try to get spacing and origin directly
-                if hasattr(self.volume, 'GetSpacing') and hasattr(self.volume, 'GetOrigin'):
-                    spacing = self.volume.GetSpacing()
-                    origin = self.volume.GetOrigin()
-                    
-                    # Simple coordinate transformation
-                    x = origin[0] + centroid_i * spacing[0]
-                    y = origin[1] + centroid_j * spacing[1]
-                    z = origin[2] + centroid_k * spacing[2]
-                    
-                    return [x, y, z]
-            
-            # Fallback to index coordinates
-            self.logger.warning("Using index coordinates for centroid (no proper transformation available)")
-            return [centroid_i, centroid_j, centroid_k]
-                
-        except Exception as e:
-            self.logger.error(f"Error in _get_masked_centroid: {str(e)}")
             return None
-
-    def _centroid_shift(self, coord_x, coord_y, coord_z, mask_array, max_iterations=100):
-        """
-        Find a point inside the spinal canal by shifting posteriorly.
-        Python implementation of centroidShift.m with iteration limit to prevent stack overflow.
-        """
-        # Use iterative approach instead of recursion to prevent stack overflow
-        iteration = 0
-        current_x, current_y = coord_x, coord_y
         
-        while iteration < max_iterations:
-            # Base case: we're at the edge or found an empty voxel
-            if current_y <= 0:
-                return current_x, current_y
-                
-            try:
-                if mask_array[current_x, current_y, coord_z] == 0:
-                    return current_x, current_y
-            except IndexError:
-                # Handle out-of-bounds access
-                return max(0, min(current_x, mask_array.shape[0]-1)), max(0, min(current_y, mask_array.shape[1]-1))
-                
-            # Move backwards along Y
-            current_y -= 1
-            iteration += 1
-            
-        # If we hit max iterations, return current position
-        return current_x, current_y
-
-    def _floodfill(self, image, i, j):
-        """
-        Floodfill to find connected region.
-        Python implementation of floodfill.m using iterative approach.
-        """
-        image_size = image.shape
-        shape = np.zeros(image_size, dtype=image.dtype)
+        # Create a new VTK image data
+        img_vtk = vtk.vtkImageData()
         
-        # Validate start coordinates
-        i = max(0, min(i, image_size[0]-1))
-        j = max(0, min(j, image_size[1]-1))
-        
-        # Starting position must be empty
-        if image[i, j] != 0:
-            return shape, np.array([]), np.array([])
-        
-        # Use stack-based approach for flood fill
-        stack = [(i, j)]
-        stack_x = []
-        stack_y = []
-        
-        # Define direction vectors for 4-connected neighbors
-        directions = [(1, 0), (-1, 0), (0, 1), (0, -1)]
-        
-        while stack:
-            x, y = stack.pop()
-            
-            # Skip if outside bounds or already filled or not empty in original
-            if (x < 0 or y < 0 or x >= image_size[0] or y >= image_size[1] or
-                    shape[x, y] != 0 or image[x, y] != 0):
-                continue
-            
-            # Mark this pixel
-            shape[x, y] = 1
-            stack_x.append(x)
-            stack_y.append(y)
-            
-            # Add neighbors to stack
-            for dx, dy in directions:
-                stack.append((x + dx, y + dy))
-        
-        return shape, np.array(stack_x), np.array(stack_y)
-
-    def _cut_pedicle(self, vol_in, y_max, y_min, buffer_front=15, buffer_end=1):
-        """
-        Cut the pedicle using the spinal canal boundaries.
-        Python implementation of cutPedicle.m with bounds checking.
-        """
-        # Ensure valid indices
-        shape = vol_in.shape
-        y_min_idx = max(0, min(int(y_min + buffer_front + 1), shape[1]-1))
-        y_max_idx = max(0, min(int(y_max - buffer_end), shape[1]-1))
-        
-        # Zero out regions
-        if y_min_idx > 0:
-            vol_in[:, 0:y_min_idx, :] = 0
-        if y_max_idx < shape[1]-1:
-            vol_in[:, y_max_idx:, :] = 0
-            
-        return vol_in
-
-    def _pedicle_roi_cut(self, vol, roi_point_x, centroid_x):
-        """
-        Cut the pedicle ROI based on the insertion point.
-        Python implementation of pedicleROICut.m with bounds checking.
-        """
-        centroid_idx = int(centroid_x)
-        shape = vol.shape
-        
-        # Ensure valid indices
-        centroid_idx = max(0, min(centroid_idx, shape[0]-1))
-        
-        if roi_point_x > centroid_x:
-            if centroid_idx > 0:
-                vol[0:centroid_idx, :, :] = 0
+        # Set dimensions and other properties from reference
+        if reference_node and hasattr(reference_node, 'GetImageData'):
+            ref_image = reference_node.GetImageData()
+            if ref_image:
+                img_vtk.SetDimensions(ref_image.GetDimensions())
+                img_vtk.SetSpacing(ref_image.GetSpacing())
+                img_vtk.SetOrigin(ref_image.GetOrigin())
         else:
-            if centroid_idx < shape[0]:
-                vol[centroid_idx:, :, :] = 0
+            img_vtk.SetDimensions(*numpy_array.shape)
+            img_vtk.SetSpacing(1.0, 1.0, 1.0)
+            img_vtk.SetOrigin(0.0, 0.0, 0.0)
+        
+        # Transpose array to VTK's ordering [z,y,x]
+        vtk_array = numpy_array.transpose(2, 1, 0).copy()
+        
+        # Convert to VTK array
+        flat_array = vtk_array.ravel()
+        vtk_data_array = numpy_support.numpy_to_vtk(
+            flat_array,
+            deep=True,
+            array_type=vtk.VTK_FLOAT
+        )
+        
+        # Set the array as scalars in the image data
+        img_vtk.GetPointData().SetScalars(vtk_data_array)
+        
+        # Create a volume node
+        if hasattr(slicer, 'mrmlScene'):
+            # Use Slicer API if available
+            volume_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "ProcessedVolume")
+            volume_node.SetAndObserveImageData(img_vtk)
+            
+            # Copy geometry from reference
+            if reference_node and hasattr(reference_node, 'GetIJKToRASMatrix'):
+                ijk_to_ras = vtk.vtkMatrix4x4()
+                reference_node.GetIJKToRASMatrix(ijk_to_ras)
+                volume_node.SetIJKToRASMatrix(ijk_to_ras)
+            
+            return volume_node
+        else:
+            # Just return the image data if not in Slicer
+            return img_vtk
+    
+    def _calculate_centroid(self, mask_array, threshold=0):
+        """
+        Calculate the centroid of non-zero voxels in a binary mask.
+        
+        Parameters:
+            mask_array: 3D numpy array
+            threshold: Minimum value to consider as part of the object
+            
+        Returns:
+            numpy.ndarray: [x, y, z] coordinates of centroid
+        """
+        # Find indices of non-zero voxels
+        indices = np.where(mask_array > threshold)
+        
+        if len(indices[0]) == 0:
+            self.logger.warning("No voxels above threshold for centroid calculation")
+            return self.insertion_point
+        
+        # Calculate mean position in IJK coordinates
+        centroid_ijk = np.array([
+            np.mean(indices[0]),
+            np.mean(indices[1]),
+            np.mean(indices[2])
+        ])
+        
+        # Convert from IJK to RAS if volume_node is available
+        if hasattr(self, 'volume_node') and self.volume_node:
+            # Check if we have a MRML volume node or a vtkImageData
+            if hasattr(self.volume_node, 'GetIJKToRASMatrix'):
+                # It's a MRML volume node
+                ijk_to_ras = vtk.vtkMatrix4x4()
+                self.volume_node.GetIJKToRASMatrix(ijk_to_ras)
                 
-        return vol
-
-    def _extract_surface_voxels(self, volume):
+                # Convert to RAS coordinates
+                ijk_coord = np.append(centroid_ijk, 1.0)  # Homogeneous coordinates
+                ras_coord = [0, 0, 0, 1]
+                ijk_to_ras.MultiplyPoint(ijk_coord, ras_coord)
+                
+                return np.array(ras_coord[0:3])
+            else:
+                # It's a vtkImageData or something else
+                self.logger.info("Volume node doesn't have GetIJKToRASMatrix - using spacing and origin")
+                
+                # Try to get spacing and origin directly
+                if hasattr(self.volume_node, 'GetSpacing') and hasattr(self.volume_node, 'GetOrigin'):
+                    spacing = self.volume_node.GetSpacing()
+                    origin = self.volume_node.GetOrigin()
+                    
+                    # Apply simple transform: RAS = IJK * spacing + origin
+                    ras_x = centroid_ijk[0] * spacing[0] + origin[0]
+                    ras_y = centroid_ijk[1] * spacing[1] + origin[1]
+                    ras_z = centroid_ijk[2] * spacing[2] + origin[2]
+                    
+                    return np.array([ras_x, ras_y, ras_z])
+                else:
+                    self.logger.warning("Cannot get spacing/origin - returning IJK coordinates")
+        
+        # Return IJK coordinates if we can't convert to RAS
+        return centroid_ijk
+    
+    def _detect_spinal_canal(self):
         """
-        Extract surface voxels from a binary volume.
-        Python implementation of extractSurfaceVoxels.m using binary erosion.
+        Detect the anterior and posterior boundaries of the spinal canal.
+        
+        Returns:
+            tuple: (canal_min_y, canal_max_y) in image coordinates
         """
+        # If no centroid, return default values
+        if not hasattr(self, 'centroid') or self.centroid is None:
+            canal_min_y = 0
+            canal_max_y = self.mask_array.shape[1] // 2
+            return canal_min_y, canal_max_y
+        
+        # Convert centroid to IJK if it's in RAS
+        centroid_ijk = self.centroid
+        if hasattr(self, 'volume_node') and self.volume_node:
+            # Convert from RAS to IJK
+            ras_to_ijk = vtk.vtkMatrix4x4()
+            self.volume_node.GetRASToIJKMatrix(ras_to_ijk)
+            
+            ras_coord = np.append(self.centroid, 1.0)
+            ijk_coord = [0, 0, 0, 1]
+            ras_to_ijk.MultiplyPoint(ras_coord, ijk_coord)
+            
+            centroid_ijk = np.array(ijk_coord[0:3])
+        
+        # Get mid-axial slice at centroid
+        sliceZ = int(np.round(centroid_ijk[2]))
+        sliceZ = max(0, min(sliceZ, self.mask_array.shape[2] - 1))
+        
+        # Extract slice
+        slice_mask = self.mask_array[:, :, sliceZ].copy()
+        
+        # Find posterior boundary by stepping backward from centroid
+        posterior_y = int(np.round(centroid_ijk[1]))
+        while posterior_y > 0:
+            if slice_mask[int(np.round(centroid_ijk[0])), posterior_y] == 0:
+                break
+            posterior_y -= 1
+        
+        # Find anterior boundary by stepping forward from posterior
+        anterior_y = posterior_y
+        while anterior_y < slice_mask.shape[1] - 1:
+            if slice_mask[int(np.round(centroid_ijk[0])), anterior_y] > 0:
+                break
+            anterior_y += 1
+        
+        # Add margin to make sure we fully capture the canal
+        canal_min_y = max(0, posterior_y - 5)
+        canal_max_y = min(slice_mask.shape[1] - 1, anterior_y + 5)
+        
+        return canal_min_y, canal_max_y
+    
+    def _cut_pedicle(self, volume_array, y_max, y_min, buffer_front=15, buffer_end=1):
+        """
+        Cut out the pedicle region from the volume.
+        
+        Parameters:
+            volume_array: 3D numpy array
+            y_max: Maximum Y coordinate of spinal canal
+            y_min: Minimum Y coordinate of spinal canal
+            buffer_front: Buffer before spinal canal
+            buffer_end: Buffer after spinal canal
+            
+        Returns:
+            numpy.ndarray: Cropped array containing only the pedicle region
+        """
+        # Create a copy to avoid modifying the original
+        result = volume_array.copy()
+        
+        # Calculate boundaries
+        y_min_idx = max(0, min(int(y_min + buffer_front + 1), result.shape[1] - 1))
+        y_max_idx = max(0, min(int(y_max - buffer_end), result.shape[1] - 1))
+        
+        # Zero out regions outside pedicle
+        if y_min_idx > 0:
+            result[:, 0:y_min_idx, :] = 0
+        if y_max_idx < result.shape[1] - 1:
+            result[:, y_max_idx:, :] = 0
+        
+        return result
+    
+    def _cut_pedicle_side(self, volume_array, insertion_x, centroid_x):
+        """
+        Cut the volume to keep only the relevant side (left or right).
+        
+        Parameters:
+            volume_array: 3D numpy array
+            insertion_x: X coordinate of insertion point
+            centroid_x: X coordinate of vertebra centroid
+            
+        Returns:
+            numpy.ndarray: Cropped array containing only one side of the pedicle
+        """
+        # Create a copy to avoid modifying the original
+        result = volume_array.copy()
+        
+        # Convert coordinates to image space if needed
+        insertion_x_ijk = insertion_x
+        centroid_x_ijk = centroid_x
+        
+        if hasattr(self, 'volume_node') and self.volume_node:
+            # Check if we have a MRML volume node with transformation matrix
+            if hasattr(self.volume_node, 'GetRASToIJKMatrix'):
+                # Convert from RAS to IJK
+                ras_to_ijk = vtk.vtkMatrix4x4()
+                self.volume_node.GetRASToIJKMatrix(ras_to_ijk)
+                
+                # Convert insertion point
+                ins_ras = np.append(np.array([insertion_x, 0, 0]), 1.0)
+                ins_ijk = [0, 0, 0, 1]
+                ras_to_ijk.MultiplyPoint(ins_ras, ins_ijk)
+                insertion_x_ijk = ins_ijk[0]
+                
+                # Convert centroid
+                cent_ras = np.append(np.array([centroid_x, 0, 0]), 1.0)
+                cent_ijk = [0, 0, 0, 1]
+                ras_to_ijk.MultiplyPoint(cent_ras, cent_ijk)
+                centroid_x_ijk = cent_ijk[0]
+            else:
+                # Try to use spacing and origin
+                if hasattr(self.volume_node, 'GetSpacing') and hasattr(self.volume_node, 'GetOrigin'):
+                    spacing = self.volume_node.GetSpacing()
+                    origin = self.volume_node.GetOrigin()
+                    
+                    # Convert RAS to IJK: IJK = (RAS - origin) / spacing
+                    insertion_x_ijk = (insertion_x - origin[0]) / spacing[0]
+                    centroid_x_ijk = (centroid_x - origin[0]) / spacing[0]
+        
+        # Round to integer for indexing
+        centroid_idx = int(np.round(centroid_x_ijk))
+        centroid_idx = max(0, min(centroid_idx, result.shape[0] - 1))
+        
+        # Cut based on which side the insertion point is on
+        if insertion_x_ijk > centroid_x_ijk:
+            # Keep right side
+            if centroid_idx > 0:
+                result[0:centroid_idx, :, :] = 0
+        else:
+            # Keep left side
+            if centroid_idx < result.shape[0]:
+                result[centroid_idx:, :, :] = 0
+        
+        return result
+    
+    def _extract_surface_voxels(self, volume_array):
+        """
+        Extract the surface voxels of a binary volume.
+        
+        Parameters:
+            volume_array: 3D numpy array
+            
+        Returns:
+            numpy.ndarray: Binary mask of surface voxels
+        """
+        # Create binary mask
+        binary_mask = (volume_array > 0).astype(np.uint8)
+        
+        # Erode the mask
         from scipy.ndimage import binary_erosion
+        eroded = binary_erosion(binary_mask)
         
-        # Perform binary erosion
-        eroded = binary_erosion(volume > 0)
+        # Surface is the difference between original and eroded
+        surface = np.logical_and(binary_mask, np.logical_not(eroded))
         
-        # Surface voxels are in original but not in eroded
-        surface_voxels = np.logical_and(volume > 0, np.logical_not(eroded))
-        return surface_voxels.astype(volume.dtype)
-
-    def _masked_volume_to_point_cloud(self, masked_volume, threshold=0):
+        return surface.astype(np.uint8)
+    
+    def _array_to_point_cloud(self, array, reference_node=None, threshold=0):
         """
-        Convert a masked volume to a VTK point cloud.
+        Convert a binary array to a VTK point cloud.
+        
+        Parameters:
+            array: 3D numpy array
+            reference_node: Volume node for coordinate transform
+            threshold: Minimum value to include
+            
+        Returns:
+            vtkPolyData: Point cloud of non-zero voxels
         """
-        try:
-            # Convert to numpy if it's a VTK object
-            if isinstance(masked_volume, vtk.vtkImageData):
-                numpy_array = self._vtk_to_numpy_3d(masked_volume)
-            else:
-                numpy_array = masked_volume
-                
-            # Get volume dimensions, spacing, and origin
-            if isinstance(masked_volume, vtk.vtkImageData):
-                dims = masked_volume.GetDimensions()
-                spacing = masked_volume.GetSpacing()
-                origin = masked_volume.GetOrigin()
-            else:
-                dims = numpy_array.shape
-                spacing = (1.0, 1.0, 1.0)
-                origin = (0.0, 0.0, 0.0)
-            
-            # Find indices of voxels above threshold
-            indices = np.where(numpy_array > threshold)
-            
-            if len(indices[0]) == 0:
-                # Return empty point cloud
-                points = vtk.vtkPoints()
-                point_cloud = vtk.vtkPolyData()
-                point_cloud.SetPoints(points)
-                return point_cloud
-            
-            # Create points in physical coordinates
+        # Find indices of voxels above threshold
+        indices = np.where(array > threshold)
+        
+        if len(indices[0]) == 0:
+            # Return empty point cloud
+            self.logger.warning("No points above threshold")
             points = vtk.vtkPoints()
-            # Pre-allocate for efficiency
-            points.SetNumberOfPoints(len(indices[0]))
-            
+            polydata = vtk.vtkPolyData()
+            polydata.SetPoints(points)
+            return polydata
+        
+        # Create points
+        points = vtk.vtkPoints()
+        points.SetNumberOfPoints(len(indices[0]))
+        
+        # Transform indices to physical coordinates
+        if reference_node:
+            if hasattr(reference_node, 'GetIJKToRASMatrix'):
+                # MRML Volume node with transformation matrix
+                ijk_to_ras = vtk.vtkMatrix4x4()
+                reference_node.GetIJKToRASMatrix(ijk_to_ras)
+                
+                # Convert each point
+                for i in range(len(indices[0])):
+                    # Create homogeneous coordinates
+                    ijk = [indices[0][i], indices[1][i], indices[2][i], 1.0]
+                    ras = [0, 0, 0, 1]
+                    ijk_to_ras.MultiplyPoint(ijk, ras)
+                    points.SetPoint(i, ras[0], ras[1], ras[2])
+            elif hasattr(reference_node, 'GetSpacing') and hasattr(reference_node, 'GetOrigin'):
+                # vtkImageData - use spacing and origin
+                spacing = reference_node.GetSpacing()
+                origin = reference_node.GetOrigin()
+                
+                # Convert each point: RAS = IJK * spacing + origin
+                for i in range(len(indices[0])):
+                    x = indices[0][i] * spacing[0] + origin[0]
+                    y = indices[1][i] * spacing[1] + origin[1]
+                    z = indices[2][i] * spacing[2] + origin[2]
+                    points.SetPoint(i, x, y, z)
+            else:
+                # Use indices directly as coordinates
+                for i in range(len(indices[0])):
+                    points.SetPoint(i, indices[0][i], indices[1][i], indices[2][i])
+        else:
+            # Use indices directly as coordinates
             for i in range(len(indices[0])):
-                x = origin[0] + indices[0][i] * spacing[0]
-                y = origin[1] + indices[1][i] * spacing[1]
-                z = origin[2] + indices[2][i] * spacing[2]
-                points.SetPoint(i, x, y, z)
+                points.SetPoint(i, indices[0][i], indices[1][i], indices[2][i])
+        
+        # Create polydata with vertex cells
+        polydata = vtk.vtkPolyData()
+        polydata.SetPoints(points)
+        
+        # Add vertices (improves rendering)
+        vertices = vtk.vtkCellArray()
+        for i in range(points.GetNumberOfPoints()):
+            vertices.InsertNextCell(1)
+            vertices.InsertCellPoint(i)
+        
+        polydata.SetVerts(vertices)
+        
+        return polydata
+    
+    def _points_to_numpy(self, vtk_points):
+        """
+        Convert vtkPoints to numpy array.
+        
+        Parameters:
+            vtk_points: vtkPoints object
             
-            # Create polydata
-            point_cloud = vtk.vtkPolyData()
-            point_cloud.SetPoints(points)
-            
-            # Add vertex cells (improves rendering)
-            vertices = vtk.vtkCellArray()
-            for i in range(points.GetNumberOfPoints()):
-                vertices.InsertNextCell(1)
-                vertices.InsertCellPoint(i)
-                
-            point_cloud.SetVerts(vertices)
-            
-            return point_cloud
-            
-        except Exception as e:
-            self.logger.error(f"Error in _masked_volume_to_point_cloud: {str(e)}")
-            # Return an empty point cloud
-            points = vtk.vtkPoints()
-            point_cloud = vtk.vtkPolyData()
-            point_cloud.SetPoints(points)
-            return point_cloud
-
-    def _vtk_points_to_numpy(self, vtk_points):
-        """Convert vtkPoints to numpy array with safety checks"""
+        Returns:
+            numpy.ndarray: Array of point coordinates (n_points × 3)
+        """
         if not vtk_points:
             return np.zeros((0, 3))
-            
+        
         n_points = vtk_points.GetNumberOfPoints()
         if n_points == 0:
             return np.zeros((0, 3))
-            
-        # More efficient approach using GetData() when available
-        if hasattr(vtk_points, 'GetData'):
-            points_data = vtk_points.GetData()
-            if points_data:
-                try:
+        
+        # Try direct conversion if possible
+        try:
+            from vtkmodules.util import numpy_support
+            if hasattr(vtk_points, 'GetData'):
+                points_data = vtk_points.GetData()
+                if points_data:
                     numpy_array = numpy_support.vtk_to_numpy(points_data)
                     return numpy_array.reshape(-1, 3)
-                except:
-                    pass  # Fall back to manual method if this fails
+        except:
+            pass
         
         # Manual conversion as fallback
-        points_array = np.zeros((n_points, 3))
+        result = np.zeros((n_points, 3))
         for i in range(n_points):
-            points_array[i] = vtk_points.GetPoint(i)
-            
-        return points_array
-    
-    def debug_centroid_calculation(self, mask_array, volume_node):
-        """
-        Debug function to investigate centroid calculation issues
-        """
-        # 1. Get dimensions and shape information
-        dims = mask_array.shape
-        self.logger.info(f"Mask array shape: {dims}")
+            result[i] = vtk_points.GetPoint(i)
         
-        # 2. Count non-zero voxels in the mask
-        non_zero_count = np.count_nonzero(mask_array)
-        self.logger.info(f"Non-zero voxels in mask: {non_zero_count}")
-        
-        # 3. Calculate the centroid in index space
-        indices = np.where(mask_array > 0)
-        if len(indices[0]) == 0:
-            self.logger.warning("No non-zero voxels for centroid calculation")
-            return
-            
-        centroid_i = np.mean(indices[0])
-        centroid_j = np.mean(indices[1])
-        centroid_k = np.mean(indices[2])
-        self.logger.info(f"Centroid in IJK coords: [{centroid_i}, {centroid_j}, {centroid_k}]")
-        
-        # 4. Check the type of volume_node and handle accordingly
-        if volume_node is None:
-            self.logger.warning("Volume node is None - cannot perform coordinate transformation")
-            return
-            
-        # For MRML nodes
-        if hasattr(volume_node, 'GetClassName'):
-            class_name = volume_node.GetClassName()
-            self.logger.info(f"Volume node class: {class_name}")
-            
-            # Handle MRML volume nodes
-            if 'vtkMRMLVolumeNode' in class_name or 'vtkMRMLLabelMapVolumeNode' in class_name:
-                # Get the underlying image data
-                image_data = volume_node.GetImageData()
-                if image_data is None:
-                    self.logger.warning("Volume node has no image data")
-                    return
-                    
-                # Get spacing and origin from the MRML node
-                spacing = volume_node.GetSpacing()
-                origin = volume_node.GetOrigin()
-                self.logger.info(f"Volume spacing: {spacing}")
-                self.logger.info(f"Volume origin: {origin}")
-                
-                # Get dimensions from the image data
-                dimensions = image_data.GetDimensions()
-                self.logger.info(f"Image dimensions: {dimensions}")
-                
-                # Get transformation matrices from the MRML node
-                ijk_to_ras = vtk.vtkMatrix4x4()
-                volume_node.GetIJKToRASMatrix(ijk_to_ras)
-                
-                # Print matrix elements for debugging
-                matrix_elements = [[ijk_to_ras.GetElement(i, j) for j in range(4)] for i in range(4)]
-                self.logger.info(f"IJK to RAS matrix: {matrix_elements}")
-                
-                # Convert IJK to RAS
-                ras_coords = [0, 0, 0, 1]
-                ijk_coords = [centroid_i, centroid_j, centroid_k, 1]
-                ijk_to_ras.MultiplyPoint(ijk_coords, ras_coords)
-                self.logger.info(f"Centroid in RAS coords: [{ras_coords[0]}, {ras_coords[1]}, {ras_coords[2]}]")
-                
-                # Check volume bounds
-                bounds = [0, 0, 0, 0, 0, 0]
-                volume_node.GetRASBounds(bounds)
-                self.logger.info(f"Volume RAS bounds: {bounds}")
-                
-                # Check if centroid is inside bounds
-                inside_x = bounds[0] <= ras_coords[0] <= bounds[1]
-                inside_y = bounds[2] <= ras_coords[1] <= bounds[3]
-                inside_z = bounds[4] <= ras_coords[2] <= bounds[5]
-                self.logger.info(f"Centroid inside bounds: x={inside_x}, y={inside_y}, z={inside_z}")
-                
-            # Direct vtkImageData
-            elif 'vtkImageData' in class_name:
-                self.logger.info("Volume node is a vtkImageData")
-                
-                spacing = volume_node.GetSpacing()
-                origin = volume_node.GetOrigin()
-                dimensions = volume_node.GetDimensions()
-                self.logger.info(f"Image spacing: {spacing}")
-                self.logger.info(f"Image origin: {origin}")
-                self.logger.info(f"Image dimensions: {dimensions}")
-                
-                # Calculate approximate RAS coordinates
-                approx_x = origin[0] + centroid_i * spacing[0]
-                approx_y = origin[1] + centroid_j * spacing[1]
-                approx_z = origin[2] + centroid_k * spacing[2]
-                self.logger.info(f"Approximate centroid in physical coords: [{approx_x}, {approx_y}, {approx_z}]")
-                
-                # Get image extent
-                extent = volume_node.GetExtent()
-                self.logger.info(f"Image extent: {extent}")
-            else:
-                self.logger.warning(f"Unknown volume node class: {class_name}")
-        else:
-            self.logger.warning("Volume node has no GetClassName method - cannot determine type")
-    
+        return result
+
+
 def visualize_critical_points(vertebra):
     """
     Create visual markers for important points used in trajectory planning.
@@ -761,12 +613,11 @@ def visualize_critical_points(vertebra):
     Parameters:
         vertebra: The Vertebra object containing the critical points
     """
-    import slicer
-    import logging
-    import vtk
-    
+    if not 'slicer' in globals():
+        return None  # Not running in Slicer
+        
     try:
-        # Create a markups fiducial node for visualization if it doesn't exist
+        # Create a markups fiducial node for visualization
         debug_fiducials_name = "TrajectoryDebugPoints"
         debug_fiducials = slicer.mrmlScene.GetFirstNodeByName(debug_fiducials_name)
         
@@ -777,112 +628,82 @@ def visualize_critical_points(vertebra):
             # Configure display properties
             display_node = debug_fiducials.GetDisplayNode()
             if display_node:
-                display_node.SetTextScale(3.0)
-                display_node.SetGlyphScale(3.0)
+                display_node.SetTextScale(2.0)
+                display_node.SetGlyphScale(2.0)
                 display_node.SetSelectedColor(1.0, 1.0, 0.0)  # Yellow for selection
         else:
             # Clear existing fiducials
             debug_fiducials.RemoveAllMarkups()
         
-        # Add the insertion point (use the one we know is correct)
+        # Add the insertion point
         insertion_point = vertebra.insertion_point
         idx1 = debug_fiducials.AddFiducial(insertion_point[0], insertion_point[1], insertion_point[2])
         debug_fiducials.SetNthFiducialLabel(idx1, "Insertion Point")
         debug_fiducials.SetNthFiducialSelected(idx1, False)
         debug_fiducials.SetNthFiducialLocked(idx1, True)
-        debug_fiducials.SetNthFiducialVisibility(idx1, True)
         
-        # Set color for insertion point fiducial
-        display_node = debug_fiducials.GetDisplayNode()
-        display_node.SetColor(0.0, 1.0, 0.0)  # Green
-        
-        # Add the main centroid if it exists
+        # Add the centroid
         if hasattr(vertebra, 'centroid') and vertebra.centroid is not None:
             centroid = vertebra.centroid
             idx2 = debug_fiducials.AddFiducial(centroid[0], centroid[1], centroid[2])
-            debug_fiducials.SetNthFiducialLabel(idx2, "Volume Centroid")
+            debug_fiducials.SetNthFiducialLabel(idx2, "Vertebra Centroid")
             debug_fiducials.SetNthFiducialSelected(idx2, False)
             debug_fiducials.SetNthFiducialLocked(idx2, True)
-            debug_fiducials.SetNthFiducialVisibility(idx2, True)
-            
-            # We can't set individual point colors in older Slicer versions
-            # Just log it so we know which is which
-            logging.info(f"Volume Centroid (RED in 3D view): {centroid}")
         
-        # Add the pedicle centroid if it exists
+        # Add the pedicle center
         if hasattr(vertebra, 'pedicle_center_point') and vertebra.pedicle_center_point is not None:
             pedicle_center = vertebra.pedicle_center_point
             idx3 = debug_fiducials.AddFiducial(pedicle_center[0], pedicle_center[1], pedicle_center[2])
             debug_fiducials.SetNthFiducialLabel(idx3, "Pedicle Center")
             debug_fiducials.SetNthFiducialSelected(idx3, False)
             debug_fiducials.SetNthFiducialLocked(idx3, True)
-            debug_fiducials.SetNthFiducialVisibility(idx3, True)
-            
-            logging.info(f"Pedicle Center (BLUE in 3D view): {pedicle_center}")
-            
-        # Log the coordinates for reference
-        logging.info(f"Insertion Point (GREEN in 3D view): {insertion_point}")
         
-        # Add the predicted trajectory line
-        if hasattr(vertebra, 'pcaVectors') and vertebra.pcaVectors is not None:
-            # Show the primary direction from PCA
-            pca_direction = vertebra.pcaVectors[:, 2]  # Third principal component
-            line_length = 30  # mm
+        # Add the PCA axes if available
+        if hasattr(vertebra, 'pcaVectors') and vertebra.pcaVectors is not None and hasattr(vertebra, 'pedicle_center_point'):
+            center = vertebra.pedicle_center_point
             
-            # Create a line from pedicle center along PCA direction
-            if hasattr(vertebra, 'pedicle_center_point') and vertebra.pedicle_center_point is not None:
-                start_point = vertebra.pedicle_center_point
-            else:
-                start_point = vertebra.insertion_point
+            # Create a separate model node for each PCA axis
+            colors = [(1, 0, 0), (0, 1, 0), (0, 0, 1)]  # RGB for each principal axis
+            labels = ["1st PCA Axis", "2nd PCA Axis", "3rd PCA Axis"]
+            
+            for i in range(3):
+                vector = vertebra.pcaVectors[:, i]
+                length = np.linalg.norm(vector)
+                if length < 1e-6:
+                    continue
+                    
+                # Scale to reasonable length for visualization
+                display_length = 20.0  # mm
+                vector = vector / length * display_length
                 
-            end_point = [
-                start_point[0] + pca_direction[0] * line_length,
-                start_point[1] + pca_direction[1] * line_length,
-                start_point[2] + pca_direction[2] * line_length
-            ]
-            
-            # Create a markups line
-            pca_line_name = "PCA_Direction"
-            pca_line = slicer.mrmlScene.GetFirstNodeByName(pca_line_name)
-            if not pca_line:
-                pca_line = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsLineNode", pca_line_name)
-                pca_line.CreateDefaultDisplayNodes()
+                # Create line endpoints
+                start_point = center - vector/2
+                end_point = center + vector/2
                 
-                # Set line properties
-                line_display = pca_line.GetDisplayNode()
-                if line_display:
-                    line_display.SetColor(1.0, 0.5, 0.0)  # Orange
-                    line_display.SetLineThickness(3.0)
-            else:
-                pca_line.RemoveAllMarkups()
+                # Create line node
+                line_node_name = f"PCA_Axis_{i+1}"
+                line_node = slicer.mrmlScene.GetFirstNodeByName(line_node_name)
+                if not line_node:
+                    line_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsLineNode", line_node_name)
+                    line_node.CreateDefaultDisplayNodes()
+                else:
+                    line_node.RemoveAllMarkups()
                 
-            # Add the line points
-            pca_line.AddControlPoint(vtk.vtkVector3d(start_point))
-            pca_line.AddControlPoint(vtk.vtkVector3d(end_point))
-            
-            logging.info(f"PCA Direction (ORANGE line in 3D view) from {start_point} to {end_point}")
-            
-        # Adjust view to show the points
-        slicer.app.layoutManager().setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
-        
-        # Show the markups in all viewers
-        for view_name in ["Red", "Yellow", "Green"]:
-            slice_widget = slicer.app.layoutManager().sliceWidget(view_name)
-            if slice_widget:
-                slice_logic = slice_widget.sliceLogic()
-                if slice_logic:
-                    # Center on insertion point
-                    try:
-                        slice_logic.SetSliceOffset(insertion_point[0 if view_name == "Yellow" else 1 if view_name == "Green" else 2])
-                    except:
-                        # Alternative method if the above fails
-                        slice_node = slice_logic.GetSliceNode()
-                        slice_node.JumpSlice(insertion_point[0], insertion_point[1], insertion_point[2])
+                # Set line endpoints
+                line_node.AddControlPoint(vtk.vtkVector3d(start_point))
+                line_node.AddControlPoint(vtk.vtkVector3d(end_point))
+                
+                # Set display properties
+                display_node = line_node.GetDisplayNode()
+                if display_node:
+                    display_node.SetColor(colors[i])
+                    display_node.SetLineThickness(3.0)
+                    display_node.SetTextScale(0)  # Hide text
         
         return debug_fiducials
         
     except Exception as e:
+        logging.getLogger(__name__).error(f"Error visualizing critical points: {str(e)}")
         import traceback
-        logging.error(f"Error visualizing critical points: {str(e)}")
-        logging.error(traceback.format_exc())
+        logging.getLogger(__name__).error(traceback.format_exc())
         return None
