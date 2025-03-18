@@ -12,7 +12,7 @@ class Vertebra:
     Handles coordinate transforms, segmentation processing, and anatomical analysis.
     """
     
-    def __init__(self, segmentation_node, volume_node, insertion_point):
+    def __init__(self, segmentation_node, volume_node, insertion_point, target_level=None):
         """
         Initialize a Vertebra object from segmentation and volume nodes.
         
@@ -20,11 +20,38 @@ class Vertebra:
             segmentation_node: vtkMRMLSegmentationNode or vtkMRMLLabelMapVolumeNode
             volume_node: vtkMRMLScalarVolumeNode containing CT intensities
             insertion_point: [x, y, z] coordinates of surgeon-specified insertion point
+            target_level: Target vertebra level (e.g., 'L4', 'L5') - extracted from fiducial if not provided
         """
         self.logger = logging.getLogger(__name__)
         self.insertion_point = np.array(insertion_point)
         
         try:
+            # Get target level from fiducial name if not provided
+            if target_level is None:
+                # Try to get the level from the fiducial name in the scene
+                if hasattr(slicer, 'mrmlScene'):
+                    fidNodes = slicer.util.getNodesByClass('vtkMRMLMarkupsFiducialNode')
+                    for fidNode in fidNodes:
+                        if fidNode.GetNumberOfControlPoints() > 0:
+                            for i in range(fidNode.GetNumberOfControlPoints()):
+                                pos = [0, 0, 0]
+                                fidNode.GetNthControlPointPosition(i, pos)
+                                # Check if this is the insertion point
+                                if np.linalg.norm(np.array(pos) - self.insertion_point) < 5:  # Within 5mm
+                                    # Get the level from the label
+                                    label = fidNode.GetNthControlPointLabel(i)
+                                    # Extract level from labels like "Fid1 - L4 - Right"
+                                    parts = label.split(" - ")
+                                    if len(parts) >= 2:
+                                        target_level = parts[1].strip()
+                                        self.logger.info(f"Using level {target_level} from fiducial {label}")
+                                    break
+            
+            if target_level is None:
+                self.logger.warning("No target level specified, will process all vertebrae")
+            else:
+                self.logger.info(f"Processing vertebra at level {target_level}")
+            
             # Create temporary labelmap if segmentation_node is a segmentation
             temp_labelmap_node = None
             if hasattr(segmentation_node, 'GetClassName'):
@@ -95,11 +122,13 @@ class Vertebra:
             canal_min_y, canal_max_y = self._detect_spinal_canal_improved()
             self.logger.info(f"Spinal canal boundaries: min_y={canal_min_y}, max_y={canal_max_y}")
             
-            # Cut out pedicle region
-            self.pedicle_array = self._cut_pedicle(
+            # Cut out pedicle region using the label-aware approach
+            self.pedicle_array = self._cut_pedicle_with_label(
                 self.masked_volume_array.copy(), 
+                self.mask_array,
                 canal_max_y, 
                 canal_min_y, 
+                target_level,
                 buffer_front=15,
                 buffer_end=1
             )
@@ -798,6 +827,150 @@ class Vertebra:
             self.logger.error(f"Error in _extract_surface_voxels: {str(e)}")
             self.logger.error(traceback.format_exc())
             return (volume_array > 0).astype(np.uint8)  # Return binary mask on error
+        
+    def _extract_surface_voxels_with_label(self, volume_array, mask_array, target_level=None):
+        """
+        Extract the surface voxels of a binary volume, filtered by the target level.
+        
+        Parameters:
+            volume_array: 3D numpy array of the volume
+            mask_array: 3D numpy array of the segmentation mask
+            target_level: Target level string (e.g., 'L4')
+            
+        Returns:
+            numpy.ndarray: Binary mask of surface voxels for the target vertebra
+        """
+        try:
+            # Find which label corresponds to the target level
+            level_label = None
+            
+            # If we have a segmentation labelmap with proper labels
+            if hasattr(self, 'mask_node') and hasattr(self.mask_node, 'GetLabelName'):
+                # Try to find the label corresponding to the target level
+                num_labels = self.mask_node.GetNumberOfLabels()
+                for i in range(num_labels):
+                    label_name = self.mask_node.GetLabelName(i)
+                    if label_name and target_level and target_level in label_name:
+                        level_label = i
+                        self.logger.info(f"Found label {level_label} for {target_level}: {label_name}")
+                        break
+            
+            # If we don't have label information, check if the mask has discrete values
+            if level_label is None:
+                # Get unique values in the mask (excluding 0)
+                unique_values = np.unique(mask_array)
+                unique_values = unique_values[unique_values > 0]
+                
+                # Map lumbar levels to typical label values if needed
+                level_mapping = {
+                    'L1': 5,
+                    'L2': 4,
+                    'L3': 3,
+                    'L4': 2,
+                    'L5': 1
+                }
+                
+                # Try to find the label based on the mapping
+                if target_level and target_level in level_mapping and level_mapping[target_level] in unique_values:
+                    level_label = level_mapping[target_level]
+                    self.logger.info(f"Using mapped label {level_label} for {target_level}")
+                elif len(unique_values) == 1:
+                    # If there's only one segmentation, use it
+                    level_label = unique_values[0]
+                    self.logger.info(f"Using only available label {level_label}")
+                else:
+                    # Can't determine which label to use
+                    self.logger.warning(f"Cannot determine label for {target_level}, using all segmentations")
+            
+            # Create binary mask for the target vertebra
+            if level_label is not None:
+                self.logger.info(f"Creating binary mask for label {level_label}")
+                binary_mask = (mask_array == level_label)
+            else:
+                # If we can't determine the label, use the entire segmentation
+                self.logger.info("Creating binary mask for all segmentations")
+                binary_mask = (mask_array > 0)
+            
+            # Log the number of voxels in the binary mask
+            self.logger.info(f"Binary mask has {np.count_nonzero(binary_mask)} voxels")
+            
+            # Check if we have a valid mask
+            if np.count_nonzero(binary_mask) == 0:
+                self.logger.warning("Empty binary mask, cannot extract surface voxels")
+                return np.zeros_like(binary_mask)
+            
+            # Use morphological operations to find surface voxels
+            try:
+                from scipy.ndimage import binary_erosion
+                
+                # Use a 3D 6-connectivity structuring element
+                struct_elem = np.array([
+                    [[0, 0, 0], [0, 1, 0], [0, 0, 0]],
+                    [[0, 1, 0], [1, 1, 1], [0, 1, 0]],
+                    [[0, 0, 0], [0, 1, 0], [0, 0, 0]]
+                ])
+                
+                # Erode the mask to get the interior
+                eroded = binary_erosion(binary_mask, structure=struct_elem)
+                
+                # Surface voxels are those in the original mask but not in the eroded mask
+                surface = np.logical_and(binary_mask, np.logical_not(eroded))
+                
+                # Check if we have a valid surface
+                surface_count = np.count_nonzero(surface)
+                self.logger.info(f"Extracted {surface_count} surface voxels")
+                
+                if surface_count == 0:
+                    self.logger.warning("No surface voxels found after erosion, using original mask")
+                    return binary_mask
+                
+                return surface.astype(np.uint8)
+                
+            except ImportError:
+                # If scipy is not available, use a simpler approach
+                self.logger.warning("scipy.ndimage not available, using simple dilation approach")
+                
+                # Simple 6-connectivity check
+                surface = np.zeros_like(binary_mask)
+                
+                # Get dimensions
+                nx, ny, nz = binary_mask.shape
+                
+                # Define 6-connectivity neighbors
+                neighbors = [
+                    (-1, 0, 0), (1, 0, 0),
+                    (0, -1, 0), (0, 1, 0),
+                    (0, 0, -1), (0, 0, 1)
+                ]
+                
+                # For each voxel in the mask, check if it's on the surface
+                # A voxel is on the surface if at least one of its 6-neighbors is background
+                voxel_coords = np.where(binary_mask)
+                for i in range(len(voxel_coords[0])):
+                    x, y, z = voxel_coords[0][i], voxel_coords[1][i], voxel_coords[2][i]
+                    
+                    for dx, dy, dz in neighbors:
+                        nx, ny, nz = x + dx, y + dy, z + dz
+                        
+                        # Check bounds
+                        if (0 <= nx < binary_mask.shape[0] and 
+                            0 <= ny < binary_mask.shape[1] and 
+                            0 <= nz < binary_mask.shape[2]):
+                            
+                            # If this neighbor is background, the current voxel is on the surface
+                            if binary_mask[nx, ny, nz] == 0:
+                                surface[x, y, z] = 1
+                                break
+                
+                return surface
+                
+        except Exception as e:
+            self.logger.error(f"Error in _extract_surface_voxels_with_label: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            
+            # Return the binary mask as fallback
+            return (mask_array > 0).astype(np.uint8)
     
     def _array_to_point_cloud(self, array, reference_node=None, threshold=0):
         """
@@ -861,6 +1034,134 @@ class Vertebra:
             polydata = vtk.vtkPolyData()
             polydata.SetPoints(points)
             return polydata
+        
+    def _array_to_point_cloud_with_label(self, array, mask_array, target_level, reference_node=None, threshold=0):
+        """
+        Convert a binary array to a VTK point cloud, filtered by the target level.
+        
+        Parameters:
+            array: 3D numpy array to extract points from
+            mask_array: 3D numpy array of the segmentation mask
+            target_level: Target level string (e.g., 'L4')
+            reference_node: Volume node for coordinate transform
+            threshold: Minimum value to include
+            
+        Returns:
+            vtkPolyData: Point cloud of non-zero voxels from the target vertebra
+        """
+        try:
+            # Find which label corresponds to the target level
+            level_label = None
+            
+            # If we have a segmentation labelmap with proper labels
+            if hasattr(self, 'mask_node') and hasattr(self.mask_node, 'GetLabelName'):
+                # Try to find the label corresponding to the target level
+                num_labels = self.mask_node.GetNumberOfLabels()
+                for i in range(num_labels):
+                    label_name = self.mask_node.GetLabelName(i)
+                    if label_name and target_level and target_level in label_name:
+                        level_label = i
+                        self.logger.info(f"Found label {level_label} for {target_level}: {label_name}")
+                        break
+            
+            # If we don't have label information, check if the mask has discrete values
+            if level_label is None and target_level:
+                # Get unique values in the mask (excluding 0)
+                unique_values = np.unique(mask_array)
+                unique_values = unique_values[unique_values > 0]
+                
+                # Map lumbar levels to typical label values if needed
+                level_mapping = {
+                    'L1': 5,
+                    'L2': 4,
+                    'L3': 3,
+                    'L4': 2,
+                    'L5': 1
+                }
+                
+                # Try to find the label based on the mapping
+                if target_level in level_mapping and level_mapping[target_level] in unique_values:
+                    level_label = level_mapping[target_level]
+                    self.logger.info(f"Using mapped label {level_label} for {target_level}")
+                elif len(unique_values) == 1:
+                    # If there's only one segmentation, use it
+                    level_label = unique_values[0]
+                    self.logger.info(f"Using only available label {level_label}")
+                else:
+                    # Can't determine which label to use
+                    self.logger.warning(f"Cannot determine label for {target_level}, using all segmentations")
+            
+            # Create a mask for the specified vertebra
+            label_mask = None
+            if level_label is not None:
+                label_mask = (mask_array == level_label)
+                self.logger.info(f"Created mask for label {level_label} with {np.count_nonzero(label_mask)} voxels")
+            else:
+                # If we can't determine the label, use all non-zero voxels
+                label_mask = (mask_array > 0)
+                self.logger.info(f"Using all segmentations with {np.count_nonzero(label_mask)} voxels")
+            
+            # Apply the label mask to the input array
+            filtered_array = array * label_mask
+            
+            # Find indices of voxels above threshold in the filtered array
+            indices = np.where(filtered_array > threshold)
+            
+            if len(indices[0]) == 0:
+                # No points found with the label filter, try using the unfiltered array
+                self.logger.warning(f"No points found in filtered array, using original array")
+                indices = np.where(array > threshold)
+                
+                if len(indices[0]) == 0:
+                    # Return empty point cloud
+                    self.logger.warning("No points above threshold in array")
+                    points = vtk.vtkPoints()
+                    polydata = vtk.vtkPolyData()
+                    polydata.SetPoints(points)
+                    return polydata
+            
+            # Create points
+            points = vtk.vtkPoints()
+            points.SetNumberOfPoints(len(indices[0]))
+            
+            # For each voxel, convert IJK to RAS and add to points
+            for i in range(len(indices[0])):
+                # IJK coordinates
+                ijk = np.array([indices[0][i], indices[1][i], indices[2][i]])
+                
+                # Convert to RAS
+                ras = self._ijk_to_ras(ijk)
+                
+                # Add point
+                points.SetPoint(i, ras[0], ras[1], ras[2])
+            
+            # Create polydata with vertex cells
+            polydata = vtk.vtkPolyData()
+            polydata.SetPoints(points)
+            
+            # Add vertices (improves rendering)
+            vertices = vtk.vtkCellArray()
+            for i in range(points.GetNumberOfPoints()):
+                vertices.InsertNextCell(1)
+                vertices.InsertCellPoint(i)
+            
+            polydata.SetVerts(vertices)
+            
+            # Log the number of points in the point cloud
+            self.logger.info(f"Created point cloud with {points.GetNumberOfPoints()} points")
+            
+            return polydata
+            
+        except Exception as e:
+            self.logger.error(f"Error in _array_to_point_cloud_with_label: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            
+            # Return empty point cloud on error
+            points = vtk.vtkPoints()
+            polydata = vtk.vtkPolyData()
+            polydata.SetPoints(points)
+            return polydata
     
     def _points_to_numpy(self, vtk_points):
         """
@@ -902,6 +1203,252 @@ class Vertebra:
             self.logger.error(f"Error in _points_to_numpy: {str(e)}")
             self.logger.error(traceback.format_exc())
             return np.zeros((0, 3))
+        
+    def _cut_pedicle_with_label(self, volume_array, mask_array, y_max, y_min, target_level, buffer_front=5, buffer_end=1):
+        """
+        Cut out the pedicle region from the volume, using segmentation label information
+        to isolate the specific vertebra of interest.
+        
+        Parameters:
+            volume_array: 3D numpy array of the volume
+            mask_array: 3D numpy array of the segmentation mask
+            y_max: Maximum Y coordinate of spinal canal
+            y_min: Minimum Y coordinate of spinal canal
+            target_level: Target level string (e.g., 'L4')
+            buffer_front: Buffer before spinal canal
+            buffer_end: Buffer after spinal canal
+            
+        Returns:
+            numpy.ndarray: Cropped array containing only the pedicle region at the specified level
+        """
+        try:
+            # Create a copy to avoid modifying the original
+            result = volume_array.copy()
+            
+            # Log the input parameters for debugging
+            self.logger.info(f"Cutting pedicle at {target_level} with y_min={y_min}, y_max={y_max}")
+            self.logger.info(f"Volume array shape: {result.shape}")
+            
+            # Extract the vertebra label for the target level
+            level_label = None
+            
+            # If we have a segmentation labelmap with proper labels
+            if hasattr(self, 'mask_node') and hasattr(self.mask_node, 'GetLabelName'):
+                # Try to find the label corresponding to the target level
+                num_labels = self.mask_node.GetNumberOfLabels()
+                for i in range(num_labels):
+                    label_name = self.mask_node.GetLabelName(i)
+                    if label_name and target_level in label_name:
+                        level_label = i
+                        self.logger.info(f"Found label {level_label} for {target_level}: {label_name}")
+                        break
+            
+            # If we don't have label information, check if the mask has discrete values
+            if level_label is None:
+                # Get unique values in the mask (excluding 0)
+                unique_values = np.unique(mask_array)
+                unique_values = unique_values[unique_values > 0]
+                
+                # Map lumbar levels to typical label values if needed
+                level_mapping = {
+                    'L1': 5,
+                    'L2': 4,
+                    'L3': 3,
+                    'L4': 2,
+                    'L5': 1
+                }
+                
+                # Try to find the label based on the mapping
+                if target_level in level_mapping and level_mapping[target_level] in unique_values:
+                    level_label = level_mapping[target_level]
+                    self.logger.info(f"Using mapped label {level_label} for {target_level}")
+                elif len(unique_values) == 1:
+                    # If there's only one segmentation, use it
+                    level_label = unique_values[0]
+                    self.logger.info(f"Using only available label {level_label}")
+                else:
+                    # Can't determine which label to use
+                    self.logger.warning(f"Cannot determine label for {target_level}, using all segmentations")
+            
+            # Create a mask for the specific vertebra if we have a label
+            vertebra_mask = np.ones_like(mask_array)
+            if level_label is not None:
+                vertebra_mask = (mask_array == level_label)
+                self.logger.info(f"Created mask for label {level_label} with {np.count_nonzero(vertebra_mask)} voxels")
+            
+                # If the mask is empty, fall back to using any segmentation
+                if np.count_nonzero(vertebra_mask) == 0:
+                    self.logger.warning(f"Empty mask for label {level_label}, using any segmentation")
+                    vertebra_mask = (mask_array > 0)
+            else:
+                # If we can't determine the label, use any segmentation
+                vertebra_mask = (mask_array > 0)
+            
+            # Apply the vertebra mask to isolate the target vertebra
+            result = result * vertebra_mask
+            
+            # Calculate boundaries
+            y_min_idx = max(0, min(int(y_min + buffer_front + 1), result.shape[1] - 1))
+            y_max_idx = max(0, min(int(y_max - buffer_end), result.shape[1] - 1))
+            
+            self.logger.info(f"Cutting pedicle at indices: y_min_idx={y_min_idx}, y_max_idx={y_max_idx}")
+            
+            # Zero out regions outside pedicle (anterior portion)
+            if y_min_idx > 0:
+                result[:, 0:y_min_idx, :] = 0
+                
+            # Zero out regions outside pedicle (posterior portion)
+            if y_max_idx < result.shape[1] - 1:
+                result[:, y_max_idx:, :] = 0
+            
+            # Check if we have a valid result
+            non_zero_count = np.count_nonzero(result)
+            self.logger.info(f"Pedicle non-zero voxel count: {non_zero_count}")
+            
+            if non_zero_count == 0:
+                self.logger.warning("Pedicle cutting resulted in empty array, using fallback approach")
+                
+                # Fall back to a more general approach
+                # First, get the centroid of this specific vertebra
+                vertebra_indices = np.where(vertebra_mask)
+                if len(vertebra_indices[0]) > 0:
+                    v_centroid_ijk = np.array([
+                        np.mean(vertebra_indices[0]),
+                        np.mean(vertebra_indices[1]),
+                        np.mean(vertebra_indices[2])
+                    ]).astype(int)
+                    
+                    # Create a small box around the vertebra centroid
+                    radius = 15  # 15 voxels in each direction
+                    x_min = max(0, v_centroid_ijk[0] - radius)
+                    x_max = min(volume_array.shape[0], v_centroid_ijk[0] + radius)
+                    y_min = max(0, v_centroid_ijk[1] - radius)
+                    y_max = min(volume_array.shape[1], v_centroid_ijk[1] + radius)
+                    z_min = max(0, v_centroid_ijk[2] - radius)
+                    z_max = min(volume_array.shape[2], v_centroid_ijk[2] + radius)
+                    
+                    # Zero out everything except the small box
+                    result = volume_array.copy() * vertebra_mask
+                    result[:x_min, :, :] = 0
+                    result[x_max:, :, :] = 0
+                    result[:, :y_min, :] = 0
+                    result[:, y_max:, :] = 0
+                    result[:, :, :z_min] = 0
+                    result[:, :, z_max:] = 0
+                else:
+                    self.logger.warning("Empty vertebra mask, using original volume")
+                    # If still empty, return the original volume
+                    result = volume_array.copy()
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Error in _cut_pedicle_with_label: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return volume_array  # Return original on error
+        
+    def get_vertebra_label_mapping(self, segmentation_node):
+        """
+        Generate a mapping from vertebra names (e.g., 'L4') to their corresponding label values
+        in the segmentation.
+        
+        Parameters:
+            segmentation_node: vtkMRMLSegmentationNode containing the vertebra segments
+            
+        Returns:
+            dict: Mapping from vertebra names to label values
+        """
+        try:
+            if not segmentation_node:
+                self.logger.warning("No segmentation node provided")
+                return {}
+                
+            # Default mapping for standard vertebra names
+            default_mapping = {
+                "L1": 5,
+                "L2": 4,
+                "L3": 3,
+                "L4": 2,
+                "L5": 1,
+                # Add more vertebra levels if needed
+                "T12": 6,
+                "S1": 0
+            }
+            
+            # Try to create a mapping from segment names in the segmentation
+            custom_mapping = {}
+            
+            # If it's a segmentation node with segments
+            if hasattr(segmentation_node, 'GetSegmentation'):
+                segmentation = segmentation_node.GetSegmentation()
+                if segmentation:
+                    # Iterate through all segments
+                    for i in range(segmentation.GetNumberOfSegments()):
+                        segment_id = segmentation.GetNthSegmentID(i)
+                        segment = segmentation.GetSegment(segment_id)
+                        if segment:
+                            segment_name = segment.GetName()
+                            
+                            # Try to extract vertebra level from segment name
+                            # Examples: "L4 vertebra", "vertebra L4", "L4", etc.
+                            vertebra_patterns = [
+                                r'([TLC][0-9]+[\-\s]?[0-9]*)[\s\-_]+vertebra',  # L4 vertebra, T12 vertebra
+                                r'vertebra[\s\-_]+([TLC][0-9]+[\-\s]?[0-9]*)',  # vertebra L4, vertebra T12
+                                r'^([TLC][0-9]+[\-\s]?[0-9]*)$',                # L4, T12
+                                r'([TLC][0-9]+[\-\s]?[0-9]*)'                   # Any occurrence of L4, T12, etc.
+                            ]
+                            
+                            import re
+                            for pattern in vertebra_patterns:
+                                match = re.search(pattern, segment_name)
+                                if match:
+                                    level = match.group(1).replace(" ", "").replace("-", "")
+                                    custom_mapping[level] = i + 1  # Label values typically start at 1
+                                    self.logger.info(f"Mapped '{level}' to label {i+1} from segment '{segment_name}'")
+                                    break
+            
+            # If it's a labelmap node with label descriptions
+            elif hasattr(segmentation_node, 'GetLabelName'):
+                for i in range(segmentation_node.GetNumberOfLabels()):
+                    label_name = segmentation_node.GetLabelName(i)
+                    if label_name:
+                        # Apply the same regex patterns
+                        import re
+                        for pattern in [
+                            r'([TLC][0-9]+[\-\s]?[0-9]*)[\s\-_]+vertebra',
+                            r'vertebra[\s\-_]+([TLC][0-9]+[\-\s]?[0-9]*)',
+                            r'^([TLC][0-9]+[\-\s]?[0-9]*)$',
+                            r'([TLC][0-9]+[\-\s]?[0-9]*)'
+                        ]:
+                            match = re.search(pattern, label_name)
+                            if match:
+                                level = match.group(1).replace(" ", "").replace("-", "")
+                                custom_mapping[level] = i
+                                self.logger.info(f"Mapped '{level}' to label {i} from label name '{label_name}'")
+                                break
+            
+            # If we found custom mappings, use those; otherwise fall back to default
+            if custom_mapping:
+                self.logger.info(f"Using custom vertebra label mapping: {custom_mapping}")
+                return custom_mapping
+            else:
+                self.logger.info(f"Using default vertebra label mapping: {default_mapping}")
+                return default_mapping
+                
+        except Exception as e:
+            self.logger.error(f"Error in get_vertebra_label_mapping: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            
+            # Return default mapping on error
+            return {
+                "L1": 5,
+                "L2": 4,
+                "L3": 3,
+                "L4": 2,
+                "L5": 1
+            }
         
 def visualize_critical_points(vertebra):
     """
