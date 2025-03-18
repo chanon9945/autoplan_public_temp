@@ -3,6 +3,7 @@ import vtk
 from vtkmodules.util import numpy_support
 from .PCAUtils import apply_pca
 import logging
+import slicer
 
 class Vertebra:
     def __init__(self, mask, volume, insertion_point):
@@ -33,7 +34,21 @@ class Vertebra:
             # Calculate centroid of masked volume
             self.centroid = self._get_masked_centroid(self.masked_volume_array)
             if self.centroid is None:
-                raise ValueError("Failed to compute centroid - masked volume may be empty")
+                self.logger.warning("Centroid calculation failed - using fallback")
+                # Use fallback - find center of bounding box
+                bounds = [0, 0, 0, 0, 0, 0]
+                if self.volume:
+                    self.volume.GetRASBounds(bounds)
+                    self.centroid = [
+                        (bounds[0] + bounds[1]) / 2,
+                        (bounds[2] + bounds[3]) / 2,
+                        (bounds[4] + bounds[5]) / 2
+                    ]
+                else:
+                    self.centroid = np.array(insertion_point)
+            
+            # Log the centroid
+            self.logger.info(f"Volume centroid: {self.centroid}")
             
             # Process spinal canal
             centroid_slice_z = int(self.centroid[2])
@@ -102,30 +117,80 @@ class Vertebra:
             # Create point cloud and run PCA
             self.pedicle_point_cloud = self._masked_volume_to_point_cloud(self.pedicle_roi_mask)
             
-            # Initialize default PCA vectors (identity matrix)
-            self.pcaVectors = np.eye(3)
-            
+            # Calculate pedicle center point explicitly
             if self.pedicle_point_cloud and self.pedicle_point_cloud.GetNumberOfPoints() > 0:
-                # Convert VTK point cloud to numpy array for PCA
-                points_array = self._vtk_points_to_numpy(self.pedicle_point_cloud.GetPoints())
+                points = self.pedicle_point_cloud.GetPoints()
+                num_points = points.GetNumberOfPoints()
                 
-                if points_array.shape[0] >= 3:  # Need at least 3 points for meaningful PCA
-                    try:
-                        coeff, latent, score = apply_pca(points_array)
-                        self.pedicle_center_point = np.mean(points_array, axis=0)
-                        scaling_factor = np.sqrt(latent) * 2
-                        self.pcaVectors = coeff * scaling_factor[:, np.newaxis]
-                    except Exception as e:
-                        self.logger.error(f"PCA failed: {str(e)}")
+                # Calculate centroid of pedicle points
+                pedicle_center_sum = np.zeros(3)
+                for i in range(num_points):
+                    point = points.GetPoint(i)
+                    pedicle_center_sum += np.array(point)
+                    
+                if num_points > 0:
+                    self.pedicle_center_point = pedicle_center_sum / num_points
+                    self.logger.info(f"Calculated pedicle center point: {self.pedicle_center_point}")
+                else:
+                    self.pedicle_center_point = np.array(self.insertion_point)
+                    self.logger.warning("No pedicle points found, using insertion point as fallback")
+            else:
+                self.pedicle_center_point = np.array(self.insertion_point)
+                self.logger.warning("No pedicle point cloud, using insertion point as fallback")
             
+            # Run PCA on pedicle point cloud
+            if self.pedicle_point_cloud and self.pedicle_point_cloud.GetNumberOfPoints() > 0:
+                # Convert points to numpy array
+                points_array = []
+                for i in range(self.pedicle_point_cloud.GetNumberOfPoints()):
+                    points_array.append(self.pedicle_point_cloud.GetPoint(i))
+                    
+                points_array = np.array(points_array)
+                
+                if points_array.shape[0] >= 3:  # Need at least 3 points for PCA
+                    from .PCAUtils import apply_pca
+                    self.pcaCoeff, self.pcaLatent, self.pcaScore = apply_pca(points_array)
+                    
+                    # Scale eigenvectors by eigenvalues for visualization
+                    self.pcaVectors = self.pcaCoeff * np.sqrt(self.pcaLatent)[:, np.newaxis]
+                    
+                    self.logger.info(f"PCA vectors calculated: {self.pcaVectors}")
+                    self.logger.info(f"PCA latent values: {self.pcaLatent}")
+                else:
+                    self.logger.warning("Not enough points for PCA")
+                    self.pcaVectors = np.eye(3)  # Identity as fallback
+            else:
+                self.logger.warning("No pedicle point cloud for PCA")
+                self.pcaVectors = np.eye(3)  # Identity as fallback
+                
             # Extract surface voxels
             self.surface_array = self._extract_surface_voxels(self.mask_array)
             self.surface = self._numpy_to_vtk_3d(self.surface_array, self.mask)
             self.point_cloud = self._masked_volume_to_point_cloud(self.surface)
             
         except Exception as e:
+            import traceback
             self.logger.error(f"Vertebra initialization error: {str(e)}")
+            self.logger.error(traceback.format_exc())
             raise
+
+    def _find_segment_for_level(self, segmentation_node, level):
+        """Find the segment ID for a specific vertebra level"""
+        if not segmentation_node:
+            return None
+            
+        segmentation = segmentation_node.GetSegmentation()
+        for i in range(segmentation.GetNumberOfSegments()):
+            segment_id = segmentation.GetNthSegmentID(i)
+            segment = segmentation.GetSegment(segment_id)
+            segment_name = segment.GetName().lower()
+            
+            # Check if this segment matches the level
+            # This needs to be adjusted based on your segment naming convention
+            if level.lower() in segment_name or f"{level} vertebra".lower() in segment_name:
+                return segment_id
+                
+        return None
 
     def _vtk_to_numpy_3d(self, vtk_image):
         """Convert vtkImageData to 3D numpy array, with safety checks"""
@@ -446,3 +511,136 @@ class Vertebra:
             points_array[i] = vtk_points.GetPoint(i)
             
         return points_array
+    
+def visualize_critical_points(vertebra):
+    """
+    Create visual markers for important points used in trajectory planning.
+    
+    Parameters:
+        vertebra: The Vertebra object containing the critical points
+    """
+    import slicer
+    import logging
+    import vtk
+    
+    try:
+        # Create a markups fiducial node for visualization if it doesn't exist
+        debug_fiducials_name = "TrajectoryDebugPoints"
+        debug_fiducials = slicer.mrmlScene.GetFirstNodeByName(debug_fiducials_name)
+        
+        if not debug_fiducials:
+            debug_fiducials = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", debug_fiducials_name)
+            debug_fiducials.CreateDefaultDisplayNodes()
+            
+            # Configure display properties
+            display_node = debug_fiducials.GetDisplayNode()
+            if display_node:
+                display_node.SetTextScale(3.0)
+                display_node.SetGlyphScale(3.0)
+                display_node.SetSelectedColor(1.0, 1.0, 0.0)  # Yellow for selection
+        else:
+            # Clear existing fiducials
+            debug_fiducials.RemoveAllMarkups()
+        
+        # Add the insertion point (use the one we know is correct)
+        insertion_point = vertebra.insertion_point
+        idx1 = debug_fiducials.AddFiducial(insertion_point[0], insertion_point[1], insertion_point[2])
+        debug_fiducials.SetNthFiducialLabel(idx1, "Insertion Point")
+        debug_fiducials.SetNthFiducialSelected(idx1, False)
+        debug_fiducials.SetNthFiducialLocked(idx1, True)
+        debug_fiducials.SetNthFiducialVisibility(idx1, True)
+        
+        # Set color for insertion point fiducial
+        display_node = debug_fiducials.GetDisplayNode()
+        display_node.SetColor(0.0, 1.0, 0.0)  # Green
+        
+        # Add the main centroid if it exists
+        if hasattr(vertebra, 'centroid') and vertebra.centroid is not None:
+            centroid = vertebra.centroid
+            idx2 = debug_fiducials.AddFiducial(centroid[0], centroid[1], centroid[2])
+            debug_fiducials.SetNthFiducialLabel(idx2, "Volume Centroid")
+            debug_fiducials.SetNthFiducialSelected(idx2, False)
+            debug_fiducials.SetNthFiducialLocked(idx2, True)
+            debug_fiducials.SetNthFiducialVisibility(idx2, True)
+            
+            # We can't set individual point colors in older Slicer versions
+            # Just log it so we know which is which
+            logging.info(f"Volume Centroid (RED in 3D view): {centroid}")
+        
+        # Add the pedicle centroid if it exists
+        if hasattr(vertebra, 'pedicle_center_point') and vertebra.pedicle_center_point is not None:
+            pedicle_center = vertebra.pedicle_center_point
+            idx3 = debug_fiducials.AddFiducial(pedicle_center[0], pedicle_center[1], pedicle_center[2])
+            debug_fiducials.SetNthFiducialLabel(idx3, "Pedicle Center")
+            debug_fiducials.SetNthFiducialSelected(idx3, False)
+            debug_fiducials.SetNthFiducialLocked(idx3, True)
+            debug_fiducials.SetNthFiducialVisibility(idx3, True)
+            
+            logging.info(f"Pedicle Center (BLUE in 3D view): {pedicle_center}")
+            
+        # Log the coordinates for reference
+        logging.info(f"Insertion Point (GREEN in 3D view): {insertion_point}")
+        
+        # Add the predicted trajectory line
+        if hasattr(vertebra, 'pcaVectors') and vertebra.pcaVectors is not None:
+            # Show the primary direction from PCA
+            pca_direction = vertebra.pcaVectors[:, 2]  # Third principal component
+            line_length = 30  # mm
+            
+            # Create a line from pedicle center along PCA direction
+            if hasattr(vertebra, 'pedicle_center_point') and vertebra.pedicle_center_point is not None:
+                start_point = vertebra.pedicle_center_point
+            else:
+                start_point = vertebra.insertion_point
+                
+            end_point = [
+                start_point[0] + pca_direction[0] * line_length,
+                start_point[1] + pca_direction[1] * line_length,
+                start_point[2] + pca_direction[2] * line_length
+            ]
+            
+            # Create a markups line
+            pca_line_name = "PCA_Direction"
+            pca_line = slicer.mrmlScene.GetFirstNodeByName(pca_line_name)
+            if not pca_line:
+                pca_line = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsLineNode", pca_line_name)
+                pca_line.CreateDefaultDisplayNodes()
+                
+                # Set line properties
+                line_display = pca_line.GetDisplayNode()
+                if line_display:
+                    line_display.SetColor(1.0, 0.5, 0.0)  # Orange
+                    line_display.SetLineThickness(3.0)
+            else:
+                pca_line.RemoveAllMarkups()
+                
+            # Add the line points
+            pca_line.AddControlPoint(vtk.vtkVector3d(start_point))
+            pca_line.AddControlPoint(vtk.vtkVector3d(end_point))
+            
+            logging.info(f"PCA Direction (ORANGE line in 3D view) from {start_point} to {end_point}")
+            
+        # Adjust view to show the points
+        slicer.app.layoutManager().setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
+        
+        # Show the markups in all viewers
+        for view_name in ["Red", "Yellow", "Green"]:
+            slice_widget = slicer.app.layoutManager().sliceWidget(view_name)
+            if slice_widget:
+                slice_logic = slice_widget.sliceLogic()
+                if slice_logic:
+                    # Center on insertion point
+                    try:
+                        slice_logic.SetSliceOffset(insertion_point[0 if view_name == "Yellow" else 1 if view_name == "Green" else 2])
+                    except:
+                        # Alternative method if the above fails
+                        slice_node = slice_logic.GetSliceNode()
+                        slice_node.JumpSlice(insertion_point[0], insertion_point[1], insertion_point[2])
+        
+        return debug_fiducials
+        
+    except Exception as e:
+        import traceback
+        logging.error(f"Error visualizing critical points: {str(e)}")
+        logging.error(traceback.format_exc())
+        return None

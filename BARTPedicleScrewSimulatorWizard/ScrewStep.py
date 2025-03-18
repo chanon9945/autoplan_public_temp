@@ -7,7 +7,7 @@ import math
 import os
 import time
 import logging
-from .Vertebra import Vertebra
+from .Vertebra import *
 from .RobotInit import Robot
 
 class ScrewStep(PedicleScrewSimulatorStep):
@@ -1150,6 +1150,15 @@ class ScrewStep(PedicleScrewSimulatorStep):
                 vertebra = Vertebra(labelMapVolumeData, inputVolumeData, insertion_coords)
                 progressDialog.setValue(30)
                 slicer.app.processEvents()
+
+                # In runAutoPlanning after creating the vertebra object
+                if hasattr(vertebra, 'centroid'):
+                    logging.info(f"Vertebra centroid: {vertebra.centroid}")
+                else:
+                    logging.warning("Vertebra has no centroid attribute")
+
+                # Visualize critical points
+                debug_fiducials = visualize_critical_points(vertebra)
                 
                 # Initialize auto planner if not already done
                 progressDialog.setLabelText("Initializing trajectory planner...")
