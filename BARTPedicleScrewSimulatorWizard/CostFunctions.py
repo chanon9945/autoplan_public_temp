@@ -209,93 +209,158 @@ def gen_traj(origin_transform, target_transform):
         logger.error(f"Error in gen_traj: {str(e)}")
         return np.array([0, 1, 0])  # Default to anterior direction
 
-def cost_total(origin, origin_transform, transform, pt_cloud, pc_vector, 
-              pedicle_center_point, weight, resampled_vol, reach):
+def cost_total(
+    insertion_point, 
+    trajectory_direction,
+    vertebra_model,
+    pedicle_axis,
+    pedicle_center,
+    weights,
+    volume_node,
+    trajectory_length
+):
     """
-    Calculate total cost for a trajectory
+    Calculate the cost of a trajectory based on multiple criteria.
     
     Parameters:
-        origin: 3D position of trajectory origin
-        origin_transform: Homogeneous transform at origin
-        transform: Homogeneous transform at target
-        pt_cloud: Point cloud of vertebra surface
-        pc_vector: Principal component vector (from PCA)
-        pedicle_center_point: 3D position of pedicle center
-        weight: Weight factors [distance_weight, angle_weight, boundary_weight, density_weight]
-        resampled_vol: Voxel array of CT intensities
-        reach: Maximum reach distance
+        insertion_point (array): 3D coordinates of insertion point
+        trajectory_direction (array): Unit vector of trajectory direction
+        vertebra_model (vtkPolyData): Surface model of the vertebra
+        pedicle_axis (array): Principal axis of the pedicle from PCA
+        pedicle_center (array): 3D coordinates of pedicle center
+        weights (array): Weights for different cost components [distance, angle, boundary, density]
+        volume_node (vtkMRMLScalarVolumeNode): CT volume node
+        trajectory_length (float): Maximum length of trajectory
         
     Returns:
-        total_cost: Weighted sum of all cost components
+        float: Combined weighted cost (lower is better)
     """
-    try:
-        # Generate trajectory
-        direction = gen_traj(origin_transform, transform)
+    cost_components = {}
+    
+    # 1. Cost based on alignment with pedicle axis
+    # Higher alignment = lower cost
+    pedicle_axis_norm = np.linalg.norm(pedicle_axis)
+    if pedicle_axis_norm > 1e-6:
+        pedicle_axis = pedicle_axis / pedicle_axis_norm
         
-        # Calculate line end point
-        line_end = origin + direction * reach
+    angle_cost = np.arccos(np.abs(np.dot(trajectory_direction, pedicle_axis)))
+    cost_components['angle'] = angle_cost
+    
+    # 2. Cost based on distance from pedicle center
+    # Calculate distance from pedicle center to trajectory line
+    center_to_insertion = pedicle_center - insertion_point
+    projection = np.dot(center_to_insertion, trajectory_direction)
+    closest_point = insertion_point + projection * trajectory_direction
+    distance_cost = np.linalg.norm(pedicle_center - closest_point)
+    cost_components['distance'] = distance_cost
+    
+    # 3. Cost based on safety margin from vertebra surface
+    # Use vtkDistancePolyDataFilter to find closest distance
+    if vertebra_model and hasattr(vertebra_model, 'GetPoints') and vertebra_model.GetPoints():
+        # Create a line representation
+        line_points = vtk.vtkPoints()
+        line_points.InsertNextPoint(insertion_point)
+        end_point = insertion_point + trajectory_direction * trajectory_length
+        line_points.InsertNextPoint(end_point)
         
-        # Create line voxelization
-        try:
-            if isinstance(resampled_vol, vtk.vtkImageData):
-                # Convert VTK image to numpy array
-                from vtkmodules.util import numpy_support
-                dims = resampled_vol.GetDimensions()
-                scalar_data = resampled_vol.GetPointData().GetScalars()
-                numpy_array = numpy_support.vtk_to_numpy(scalar_data)
-                numpy_array = numpy_array.reshape(dims[2], dims[1], dims[0]).transpose(2, 1, 0)
-                line_voxel = bresenham_3d(origin, line_end, numpy_array)
-                cost_density = np.sum(line_voxel * numpy_array)
-            else:
-                # Direct numpy array
-                line_voxel = bresenham_3d(origin, line_end, resampled_vol)
-                cost_density = np.sum(line_voxel * resampled_vol)
-        except Exception as e:
-            logger.error(f"Error in line voxelization: {str(e)}")
-            cost_density = 0
+        line_cells = vtk.vtkCellArray()
+        line = vtk.vtkLine()
+        line.GetPointIds().SetId(0, 0)
+        line.GetPointIds().SetId(1, 1)
+        line_cells.InsertNextCell(line)
         
-        # Calculate cost components
+        trajectory_polydata = vtk.vtkPolyData()
+        trajectory_polydata.SetPoints(line_points)
+        trajectory_polydata.SetLines(line_cells)
         
-        # 1. Boundary cost - find closest distance to surface
-        try:
-            _, cost_boundary = find_closest_point_to_line(pt_cloud, origin, direction)
-            if cost_boundary == float('inf'):
-                cost_boundary = reach  # Use maximum distance if computation fails
-        except Exception as e:
-            logger.error(f"Error in boundary cost calculation: {str(e)}")
-            cost_boundary = reach
+        # Use distance filter
+        distance_filter = vtk.vtkDistancePolyDataFilter()
+        distance_filter.SetInputData(0, trajectory_polydata)
+        distance_filter.SetInputData(1, vertebra_model)
+        distance_filter.SignedDistanceOff()
+        distance_filter.Update()
         
-        # 2. Angle cost - alignment with principal component
-        try:
-            pc_norm = np.linalg.norm(pc_vector)
-            if pc_norm < 1e-6:
-                cost_angle = 0  # No preferred direction
-            else:
-                pc_normalized = pc_vector / pc_norm
-                cost_angle = np.arccos(np.clip(np.abs(np.dot(direction, pc_normalized)), 0, 1))
-        except Exception as e:
-            logger.error(f"Error in angle cost calculation: {str(e)}")
-            cost_angle = 0
-        
-        # 3. Distance cost - distance from pedicle center
-        try:
-            cost_dist = point_to_line_distance(pedicle_center_point, origin, direction)
-            if cost_dist == float('inf'):
-                cost_dist = reach  # Use maximum distance if computation fails
-        except Exception as e:
-            logger.error(f"Error in distance cost calculation: {str(e)}")
-            cost_dist = reach
-        
-        # Total weighted cost
-        total_cost = (
-            weight[0] * cost_dist + 
-            weight[1] * cost_angle + 
-            (1.0/weight[2]) * cost_boundary + 
-            weight[3] * cost_density
+        # Get minimum distance
+        output = distance_filter.GetOutput()
+        distances = vtk.util.numpy_support.vtk_to_numpy(
+            output.GetPointData().GetArray('Distance')
         )
+        safety_cost = np.min(distances) if distances.size > 0 else trajectory_length
         
-        return total_cost
+        # Invert: smaller distance = higher cost
+        if safety_cost < 1.0:  # If too close to surface
+            safety_cost = 1.0 / max(safety_cost, 0.1)  # Avoid division by zero
+        else:
+            safety_cost = 0.0  # Safe distance
+    else:
+        safety_cost = 0.0
+    cost_components['safety'] = safety_cost
+    
+    # 4. Cost based on bone density along trajectory
+    # Sample the CT volume along the trajectory
+    if volume_node:
+        # Get image data
+        image_data = volume_node.GetImageData()
         
-    except Exception as e:
-        logger.error(f"Error in cost_total: {str(e)}")
-        return float('inf')  # Return maximum cost on error
+        # Get RAS to IJK transform
+        ras_to_ijk = vtk.vtkMatrix4x4()
+        volume_node.GetRASToIJKMatrix(ras_to_ijk)
+        
+        # Sample points along trajectory
+        num_samples = 50
+        density_values = []
+        
+        for i in range(num_samples):
+            t = i / (num_samples - 1)
+            point_ras = insertion_point + t * trajectory_direction * trajectory_length
+            
+            # Convert RAS to IJK
+            point_ijk = [0, 0, 0, 1]
+            ras_to_ijk.MultiplyPoint(np.append(point_ras, 1.0), point_ijk)
+            
+            # Convert to integer voxel coordinates
+            ijk = [int(round(point_ijk[j])) for j in range(3)]
+            
+            # Check if point is within volume bounds
+            dims = image_data.GetDimensions()
+            if (0 <= ijk[0] < dims[0] and 
+                0 <= ijk[1] < dims[1] and 
+                0 <= ijk[2] < dims[2]):
+                
+                # Get voxel value (HU)
+                value = image_data.GetScalarComponentAsDouble(ijk[0], ijk[1], ijk[2], 0)
+                density_values.append(value)
+        
+        # Calculate mean density along trajectory
+        if density_values:
+            # Define target range for bone (e.g., trabecular bone is ~200-400 HU)
+            min_target_hu = 200
+            max_target_hu = 400
+            
+            # Convert to numpy array for easier calculation
+            density_array = np.array(density_values)
+            
+            # Count voxels in target range (good density)
+            good_density_count = np.sum((density_array >= min_target_hu) & 
+                                       (density_array <= max_target_hu))
+            
+            # Calculate percentage of trajectory in good bone
+            good_density_ratio = good_density_count / len(density_values)
+            
+            # Invert: higher good density ratio = lower cost
+            density_cost = 1.0 - good_density_ratio
+        else:
+            density_cost = 1.0  # Maximum cost if no samples
+    else:
+        density_cost = 0.0
+    cost_components['density'] = density_cost
+    
+    # Calculate weighted sum
+    total_cost = (
+        weights[0] * cost_components['distance'] +
+        weights[1] * cost_components['angle'] +
+        weights[2] * cost_components['safety'] +
+        weights[3] * cost_components['density']
+    )
+    
+    return total_cost, cost_components

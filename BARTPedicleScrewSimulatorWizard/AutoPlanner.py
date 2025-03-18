@@ -81,9 +81,10 @@ class PedicleScrewAutoPlanner:
         for i in range(self.resolution):
             h1_i = self.robot.link_1.transform[:, :, i]
             transform = insertion_transform @ h1_i @ self.h2_mean
+            traj = gen_traj(insertion_transform,transform)
             
             cost_h1[i] = cost_total(
-                insertion_point, insertion_transform, transform,
+                insertion_point, traj,
                 vertebra.point_cloud, vertebra.pcaVectors[:, 2], pedicle_center,
                 self.weight, vertebra.maskedVolume, self.reach
             )
@@ -105,9 +106,10 @@ class PedicleScrewAutoPlanner:
         for i in range(self.resolution):
             h2_i = self.robot.link_2.transform[:, :, i]
             transform = insertion_transform @ h1_best @ h2_i
+            traj = gen_traj(insertion_transform,transform)
             
             cost_h2[i] = cost_total(
-                insertion_point, insertion_transform, transform,
+                insertion_point, traj,
                 vertebra.point_cloud, vertebra.pcaVectors[:, 2], pedicle_center,
                 self.weight, vertebra.maskedVolume, self.reach
             )
