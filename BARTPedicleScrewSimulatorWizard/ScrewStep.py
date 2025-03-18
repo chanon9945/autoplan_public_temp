@@ -1147,7 +1147,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
                 labelMapVolumeData = labelmapNode.GetImageData()
                 inputVolumeData = inputVolume.GetImageData()
                 
-                vertebra = Vertebra(labelMapVolumeData, inputVolumeData, insertion_coords)
+                vertebra = Vertebra(labelmapNode, inputVolumeData, insertion_coords)
                 progressDialog.setValue(30)
                 slicer.app.processEvents()
 

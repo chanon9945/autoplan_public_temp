@@ -33,23 +33,13 @@ class Vertebra:
             
             # Calculate centroid of masked volume
             self.centroid = self._get_masked_centroid(self.masked_volume_array)
+            
+            # Add the debug call here
+            self.debug_centroid_calculation(self.mask_array, volume)
+            
             if self.centroid is None:
-                self.logger.warning("Centroid calculation failed - using fallback")
-                # Use fallback - find center of bounding box
-                bounds = [0, 0, 0, 0, 0, 0]
-                if self.volume:
-                    self.volume.GetRASBounds(bounds)
-                    self.centroid = [
-                        (bounds[0] + bounds[1]) / 2,
-                        (bounds[2] + bounds[3]) / 2,
-                        (bounds[4] + bounds[5]) / 2
-                    ]
-                else:
-                    self.centroid = np.array(insertion_point)
-            
-            # Log the centroid
-            self.logger.info(f"Volume centroid: {self.centroid}")
-            
+                raise ValueError("Failed to compute centroid - masked volume may be empty")
+                
             # Process spinal canal
             centroid_slice_z = int(self.centroid[2])
             mask_slice = self.mask_array[:, :, centroid_slice_z].copy()
@@ -117,62 +107,110 @@ class Vertebra:
             # Create point cloud and run PCA
             self.pedicle_point_cloud = self._masked_volume_to_point_cloud(self.pedicle_roi_mask)
             
-            # Calculate pedicle center point explicitly
-            if self.pedicle_point_cloud and self.pedicle_point_cloud.GetNumberOfPoints() > 0:
-                points = self.pedicle_point_cloud.GetPoints()
-                num_points = points.GetNumberOfPoints()
-                
-                # Calculate centroid of pedicle points
-                pedicle_center_sum = np.zeros(3)
-                for i in range(num_points):
-                    point = points.GetPoint(i)
-                    pedicle_center_sum += np.array(point)
-                    
-                if num_points > 0:
-                    self.pedicle_center_point = pedicle_center_sum / num_points
-                    self.logger.info(f"Calculated pedicle center point: {self.pedicle_center_point}")
-                else:
-                    self.pedicle_center_point = np.array(self.insertion_point)
-                    self.logger.warning("No pedicle points found, using insertion point as fallback")
-            else:
-                self.pedicle_center_point = np.array(self.insertion_point)
-                self.logger.warning("No pedicle point cloud, using insertion point as fallback")
+            # Initialize default PCA vectors (identity matrix)
+            self.pcaVectors = np.eye(3)
             
-            # Run PCA on pedicle point cloud
             if self.pedicle_point_cloud and self.pedicle_point_cloud.GetNumberOfPoints() > 0:
-                # Convert points to numpy array
-                points_array = []
-                for i in range(self.pedicle_point_cloud.GetNumberOfPoints()):
-                    points_array.append(self.pedicle_point_cloud.GetPoint(i))
-                    
-                points_array = np.array(points_array)
+                # Convert VTK point cloud to numpy array for PCA
+                points_array = self._vtk_points_to_numpy(self.pedicle_point_cloud.GetPoints())
                 
-                if points_array.shape[0] >= 3:  # Need at least 3 points for PCA
-                    from .PCAUtils import apply_pca
-                    self.pcaCoeff, self.pcaLatent, self.pcaScore = apply_pca(points_array)
-                    
-                    # Scale eigenvectors by eigenvalues for visualization
-                    self.pcaVectors = self.pcaCoeff * np.sqrt(self.pcaLatent)[:, np.newaxis]
-                    
-                    self.logger.info(f"PCA vectors calculated: {self.pcaVectors}")
-                    self.logger.info(f"PCA latent values: {self.pcaLatent}")
-                else:
-                    self.logger.warning("Not enough points for PCA")
-                    self.pcaVectors = np.eye(3)  # Identity as fallback
-            else:
-                self.logger.warning("No pedicle point cloud for PCA")
-                self.pcaVectors = np.eye(3)  # Identity as fallback
-                
+                if points_array.shape[0] >= 3:  # Need at least 3 points for meaningful PCA
+                    try:
+                        coeff, latent, score = apply_pca(points_array)
+                        self.pedicle_center_point = np.mean(points_array, axis=0)
+                        scaling_factor = np.sqrt(latent) * 2
+                        self.pcaVectors = coeff * scaling_factor[:, np.newaxis]
+                    except Exception as e:
+                        self.logger.error(f"PCA failed: {str(e)}")
+            
             # Extract surface voxels
             self.surface_array = self._extract_surface_voxels(self.mask_array)
             self.surface = self._numpy_to_vtk_3d(self.surface_array, self.mask)
             self.point_cloud = self._masked_volume_to_point_cloud(self.surface)
             
         except Exception as e:
-            import traceback
             self.logger.error(f"Vertebra initialization error: {str(e)}")
+            import traceback
             self.logger.error(traceback.format_exc())
+            
+            # Set fallback values for critical properties
+            self.centroid = np.array(insertion_point)
+            self.mask_array = np.zeros((1, 1, 1))
+            self.volume_array = np.zeros((1, 1, 1))
+            self.masked_volume_array = np.zeros((1, 1, 1))
+            self.maskedVolume = vtk.vtkImageData()
+            self.spinal_canal = np.zeros((1, 1))
+            self.pedicle_array = np.zeros((1, 1, 1))
+            self.pedicle_mask_array = np.zeros((1, 1, 1))
+            self.pedicle = vtk.vtkImageData()
+            self.pedicle_mask = vtk.vtkImageData()
+            self.pedicle_roi_array = np.zeros((1, 1, 1))
+            self.pedicle_roi_mask_array = np.zeros((1, 1, 1))
+            self.pedicle_roi = vtk.vtkImageData()
+            self.pedicle_roi_mask = vtk.vtkImageData()
+            self.pedicle_point_cloud = vtk.vtkPolyData()
+            self.pcaVectors = np.eye(3)
+            self.pedicle_center_point = np.array(insertion_point)
+            self.surface_array = np.zeros((1, 1, 1))
+            self.surface = vtk.vtkImageData()
+            self.point_cloud = vtk.vtkPolyData()
             raise
+
+    def debug_centroid_calculation(self, mask_array, volume_node):
+        """
+        Debug function to investigate centroid calculation issues
+        """
+        # 1. Get dimensions and shape information
+        dims = mask_array.shape
+        self.logger.info(f"Mask array shape: {dims}")
+        
+        # 2. Count non-zero voxels in the mask
+        non_zero_count = np.count_nonzero(mask_array)
+        self.logger.info(f"Non-zero voxels in mask: {non_zero_count}")
+        
+        # 3. Calculate the centroid in index space
+        indices = np.where(mask_array > 0)
+        if len(indices[0]) == 0:
+            self.logger.warning("No non-zero voxels for centroid calculation")
+            return
+            
+        centroid_i = np.mean(indices[0])
+        centroid_j = np.mean(indices[1])
+        centroid_k = np.mean(indices[2])
+        self.logger.info(f"Centroid in IJK coords: [{centroid_i}, {centroid_j}, {centroid_k}]")
+        
+        # 4. Check transformations
+        if volume_node:
+            # Print volume node information
+            spacing = volume_node.GetSpacing()
+            origin = volume_node.GetOrigin()
+            self.logger.info(f"Volume spacing: {spacing}")
+            self.logger.info(f"Volume origin: {origin}")
+            
+            # Get transformation matrices
+            ijk_to_ras = vtk.vtkMatrix4x4()
+            volume_node.GetIJKToRASMatrix(ijk_to_ras)
+            
+            # Print matrix elements for debugging
+            matrix_elements = [[ijk_to_ras.GetElement(i, j) for j in range(4)] for i in range(4)]
+            self.logger.info(f"IJK to RAS matrix: {matrix_elements}")
+            
+            # Convert IJK to RAS
+            ras_coords = [0, 0, 0, 1]
+            ijk_coords = [centroid_i, centroid_j, centroid_k, 1]
+            ijk_to_ras.MultiplyPoint(ijk_coords, ras_coords)
+            self.logger.info(f"Centroid in RAS coords: [{ras_coords[0]}, {ras_coords[1]}, {ras_coords[2]}]")
+            
+            # Check volume bounds
+            bounds = [0, 0, 0, 0, 0, 0]
+            volume_node.GetRASBounds(bounds)
+            self.logger.info(f"Volume RAS bounds: {bounds}")
+            
+            # Check if centroid is inside bounds
+            inside_x = bounds[0] <= ras_coords[0] <= bounds[1]
+            inside_y = bounds[2] <= ras_coords[1] <= bounds[3]
+            inside_z = bounds[4] <= ras_coords[2] <= bounds[5]
+            self.logger.info(f"Centroid inside bounds: x={inside_x}, y={inside_y}, z={inside_z}")
 
     def _find_segment_for_level(self, segmentation_node, level):
         """Find the segment ID for a specific vertebra level"""
@@ -193,64 +231,134 @@ class Vertebra:
         return None
 
     def _vtk_to_numpy_3d(self, vtk_image):
-        """Convert vtkImageData to 3D numpy array, with safety checks"""
-        if not vtk_image:
+        """
+        Convert vtkImageData or vtkMRMLVolumeNode to 3D numpy array with proper handling
+        of both node types and error conditions.
+        """
+        if vtk_image is None:
+            self.logger.warning("Empty VTK image provided")
             return np.zeros((1, 1, 1))
         
-        dims = vtk_image.GetDimensions()
-        point_data = vtk_image.GetPointData()
-        if not point_data:
-            return np.zeros(dims[::-1])
+        # Determine if this is a MRML node or direct vtkImageData
+        image_data = None
+        if hasattr(vtk_image, 'GetClassName'):
+            class_name = vtk_image.GetClassName()
             
-        scalar_data = point_data.GetScalars()
-        if not scalar_data:
-            return np.zeros(dims[::-1])
-            
-        numpy_data = numpy_support.vtk_to_numpy(scalar_data)
+            # For MRML volume nodes, get the underlying image data
+            if 'vtkMRMLVolumeNode' in class_name or 'vtkMRMLLabelMapVolumeNode' in class_name:
+                image_data = vtk_image.GetImageData()
+                if image_data is None:
+                    self.logger.warning(f"{class_name} has no image data")
+                    return np.zeros((1, 1, 1))
+            elif 'vtkImageData' in class_name:
+                # It's already a vtkImageData
+                image_data = vtk_image
+            else:
+                self.logger.warning(f"Unsupported input type: {class_name}")
+                return np.zeros((1, 1, 1))
+        else:
+            # If no GetClassName method, assume it's a vtkImageData
+            # (less safe but accommodates different VTK Python wrappings)
+            image_data = vtk_image
         
-        # Check for zero dimensions to avoid reshape errors
-        if 0 in dims:
-            return np.zeros((1, 1, 1))
-            
-        # VTK stores data in format (z, y, x)
+        # Now process the vtkImageData
         try:
-            return numpy_data.reshape(dims[2], dims[1], dims[0]).transpose(2, 1, 0)
-        except ValueError:
-            # If reshape fails, return zeros with correct dimensions
-            self.logger.warning(f"Failed to reshape VTK data with dims {dims}")
-            return np.zeros(dims[::-1])
+            dims = image_data.GetDimensions()
+            if 0 in dims:
+                self.logger.warning(f"VTK image has zero dimension: {dims}")
+                return np.zeros((1, 1, 1))
+                
+            point_data = image_data.GetPointData()
+            if not point_data:
+                self.logger.warning("VTK image has no point data")
+                return np.zeros(dims[::-1])
+                
+            scalar_data = point_data.GetScalars()
+            if not scalar_data:
+                self.logger.warning("VTK image has no scalar data")
+                return np.zeros(dims[::-1])
+                
+            # Convert to numpy array
+            from vtkmodules.util import numpy_support
+            numpy_data = numpy_support.vtk_to_numpy(scalar_data)
+            
+            # VTK stores data in [z,y,x] order, but we want [x,y,z]
+            reshaped_data = numpy_data.reshape(dims[2], dims[1], dims[0])
+            return reshaped_data.transpose(2, 1, 0)  # Transpose to [x,y,z]
+        except Exception as e:
+            self.logger.error(f"Failed to convert VTK data to numpy: {str(e)}")
+            if hasattr(image_data, 'GetDimensions'):
+                try:
+                    dims = image_data.GetDimensions()
+                    return np.zeros(dims[::-1])
+                except:
+                    pass
+            return np.zeros((1, 1, 1))
 
     def _numpy_to_vtk_3d(self, numpy_array, reference_vtk=None):
-        """Convert 3D numpy array to vtkImageData, with error handling"""
+        """
+        Convert 3D numpy array to vtkImageData with proper handling of reference
+        objects that may be either MRML nodes or direct vtkImageData.
+        """
         if numpy_array is None or numpy_array.size == 0:
-            self.logger.warning("Empty array passed to _numpy_to_vtk_3d")
+            self.logger.warning("Empty numpy array provided")
             return vtk.vtkImageData()
+        
+        # Create output VTK image
+        vtk_image = vtk.vtkImageData()
+        
+        # Extract image properties from reference if available
+        if reference_vtk is not None:
+            # Determine if reference is a MRML node or direct vtkImageData
+            ref_image_data = None
+            ref_spacing = [1.0, 1.0, 1.0]
+            ref_origin = [0.0, 0.0, 0.0]
             
-        if reference_vtk is None:
-            # Create new vtkImageData if no reference is provided
-            vtk_image = vtk.vtkImageData()
-            vtk_image.SetDimensions(numpy_array.shape)
+            if hasattr(reference_vtk, 'GetClassName'):
+                class_name = reference_vtk.GetClassName()
+                
+                # Handle MRML volume nodes
+                if 'vtkMRMLVolumeNode' in class_name or 'vtkMRMLLabelMapVolumeNode' in class_name:
+                    ref_image_data = reference_vtk.GetImageData()
+                    ref_spacing = reference_vtk.GetSpacing()
+                    ref_origin = reference_vtk.GetOrigin()
+                
+                # Handle direct vtkImageData
+                elif 'vtkImageData' in class_name:
+                    ref_image_data = reference_vtk
+                    ref_spacing = reference_vtk.GetSpacing()
+                    ref_origin = reference_vtk.GetOrigin()
+            else:
+                # Assume it's a vtkImageData if no GetClassName
+                ref_image_data = reference_vtk
+                if hasattr(reference_vtk, 'GetSpacing'):
+                    ref_spacing = reference_vtk.GetSpacing()
+                if hasattr(reference_vtk, 'GetOrigin'):
+                    ref_origin = reference_vtk.GetOrigin()
+            
+            # Apply properties to output image
+            if ref_image_data and hasattr(ref_image_data, 'GetDimensions'):
+                vtk_image.SetDimensions(ref_image_data.GetDimensions())
+            else:
+                vtk_image.SetDimensions(numpy_array.shape)
+                
+            vtk_image.SetSpacing(ref_spacing)
+            vtk_image.SetOrigin(ref_origin)
+            
+            # Direction matrix handling is removed to prevent errors
+        else:
+            # No reference provided, use array shape
+            vtk_image.SetDimensions(numpy_array.shape[0], numpy_array.shape[1], numpy_array.shape[2])
             vtk_image.SetSpacing(1.0, 1.0, 1.0)
             vtk_image.SetOrigin(0.0, 0.0, 0.0)
-        else:
-            # Clone properties from reference vtkImageData
-            vtk_image = vtk.vtkImageData()
-            vtk_image.SetDimensions(reference_vtk.GetDimensions())
-            vtk_image.SetSpacing(reference_vtk.GetSpacing())
-            vtk_image.SetOrigin(reference_vtk.GetOrigin())
-            
-            # Copy direction matrix if available
-            if hasattr(reference_vtk, 'GetDirectionMatrix'):
-                direction_matrix = reference_vtk.GetDirectionMatrix()
-                if direction_matrix:
-                    vtk_image.SetDirectionMatrix(direction_matrix)
         
-        try:    
-            # Transpose array to VTK's expected format (x,y,z) -> (z,y,x)
+        try:
+            # Transpose numpy array from [x,y,z] to [z,y,x] for VTK
             numpy_array_t = numpy_array.transpose(2, 1, 0).copy()
-            flat_array = numpy_array_t.flatten()
+            flat_array = numpy_array_t.ravel()
             
-            # Create VTK array and set it as the image data
+            # Create VTK array and set as image scalars
+            from vtkmodules.util import numpy_support
             vtk_array = numpy_support.numpy_to_vtk(
                 flat_array, 
                 deep=True,
@@ -262,7 +370,7 @@ class Vertebra:
         except Exception as e:
             self.logger.error(f"Error in _numpy_to_vtk_3d: {str(e)}")
             return vtk.vtkImageData()
-
+    
     def _get_masked_centroid(self, masked_volume_array, threshold=0):
         """
         Compute the centroid of nonzero voxels in a masked volume.
@@ -273,6 +381,7 @@ class Vertebra:
             indices = np.where(masked_volume_array > threshold)
             
             if len(indices[0]) == 0:
+                self.logger.warning("No voxels above threshold found for centroid calculation")
                 return None
                 
             # Calculate centroid in index space
@@ -280,20 +389,52 @@ class Vertebra:
             centroid_j = np.mean(indices[1])
             centroid_k = np.mean(indices[2])
             
-            # Get spacing and origin from the volume
-            if hasattr(self, 'volume') and self.volume:
-                spacing = self.volume.GetSpacing()
-                origin = self.volume.GetOrigin()
+            # Convert to physical coordinates based on available information
+            if hasattr(self, 'volume') and self.volume is not None:
+                # Determine if this is a MRML node or direct vtkImageData
+                if hasattr(self.volume, 'GetClassName'):
+                    class_name = self.volume.GetClassName()
+                    
+                    # Handle MRML volume nodes
+                    if 'vtkMRMLVolumeNode' in class_name or 'vtkMRMLLabelMapVolumeNode' in class_name:
+                        # Use the transformation matrix
+                        ijk_to_ras = vtk.vtkMatrix4x4()
+                        self.volume.GetIJKToRASMatrix(ijk_to_ras)
+                        
+                        # Convert IJK coordinates to RAS
+                        ras_coords = [0, 0, 0, 1]  # Homogeneous coordinates
+                        ijk_point = [centroid_i, centroid_j, centroid_k, 1]
+                        ijk_to_ras.MultiplyPoint(ijk_point, ras_coords)
+                        
+                        return [ras_coords[0], ras_coords[1], ras_coords[2]]
+                    
+                    # Handle direct vtkImageData
+                    elif 'vtkImageData' in class_name:
+                        spacing = self.volume.GetSpacing()
+                        origin = self.volume.GetOrigin()
+                        
+                        # Simple coordinate transformation
+                        x = origin[0] + centroid_i * spacing[0]
+                        y = origin[1] + centroid_j * spacing[1]
+                        z = origin[2] + centroid_k * spacing[2]
+                        
+                        return [x, y, z]
                 
-                # Convert to physical coordinates
-                centroid_x = origin[0] + spacing[0] * centroid_i
-                centroid_y = origin[1] + spacing[1] * centroid_j
-                centroid_z = origin[2] + spacing[2] * centroid_k
-                
-                return [centroid_x, centroid_y, centroid_z]
-            else:
-                # Return index coordinates if volume info not available
-                return [centroid_i, centroid_j, centroid_k]
+                # As a fallback, try to get spacing and origin directly
+                if hasattr(self.volume, 'GetSpacing') and hasattr(self.volume, 'GetOrigin'):
+                    spacing = self.volume.GetSpacing()
+                    origin = self.volume.GetOrigin()
+                    
+                    # Simple coordinate transformation
+                    x = origin[0] + centroid_i * spacing[0]
+                    y = origin[1] + centroid_j * spacing[1]
+                    z = origin[2] + centroid_k * spacing[2]
+                    
+                    return [x, y, z]
+            
+            # Fallback to index coordinates
+            self.logger.warning("Using index coordinates for centroid (no proper transformation available)")
+            return [centroid_i, centroid_j, centroid_k]
                 
         except Exception as e:
             self.logger.error(f"Error in _get_masked_centroid: {str(e)}")
@@ -511,6 +652,107 @@ class Vertebra:
             points_array[i] = vtk_points.GetPoint(i)
             
         return points_array
+    
+    def debug_centroid_calculation(self, mask_array, volume_node):
+        """
+        Debug function to investigate centroid calculation issues
+        """
+        # 1. Get dimensions and shape information
+        dims = mask_array.shape
+        self.logger.info(f"Mask array shape: {dims}")
+        
+        # 2. Count non-zero voxels in the mask
+        non_zero_count = np.count_nonzero(mask_array)
+        self.logger.info(f"Non-zero voxels in mask: {non_zero_count}")
+        
+        # 3. Calculate the centroid in index space
+        indices = np.where(mask_array > 0)
+        if len(indices[0]) == 0:
+            self.logger.warning("No non-zero voxels for centroid calculation")
+            return
+            
+        centroid_i = np.mean(indices[0])
+        centroid_j = np.mean(indices[1])
+        centroid_k = np.mean(indices[2])
+        self.logger.info(f"Centroid in IJK coords: [{centroid_i}, {centroid_j}, {centroid_k}]")
+        
+        # 4. Check the type of volume_node and handle accordingly
+        if volume_node is None:
+            self.logger.warning("Volume node is None - cannot perform coordinate transformation")
+            return
+            
+        # For MRML nodes
+        if hasattr(volume_node, 'GetClassName'):
+            class_name = volume_node.GetClassName()
+            self.logger.info(f"Volume node class: {class_name}")
+            
+            # Handle MRML volume nodes
+            if 'vtkMRMLVolumeNode' in class_name or 'vtkMRMLLabelMapVolumeNode' in class_name:
+                # Get the underlying image data
+                image_data = volume_node.GetImageData()
+                if image_data is None:
+                    self.logger.warning("Volume node has no image data")
+                    return
+                    
+                # Get spacing and origin from the MRML node
+                spacing = volume_node.GetSpacing()
+                origin = volume_node.GetOrigin()
+                self.logger.info(f"Volume spacing: {spacing}")
+                self.logger.info(f"Volume origin: {origin}")
+                
+                # Get dimensions from the image data
+                dimensions = image_data.GetDimensions()
+                self.logger.info(f"Image dimensions: {dimensions}")
+                
+                # Get transformation matrices from the MRML node
+                ijk_to_ras = vtk.vtkMatrix4x4()
+                volume_node.GetIJKToRASMatrix(ijk_to_ras)
+                
+                # Print matrix elements for debugging
+                matrix_elements = [[ijk_to_ras.GetElement(i, j) for j in range(4)] for i in range(4)]
+                self.logger.info(f"IJK to RAS matrix: {matrix_elements}")
+                
+                # Convert IJK to RAS
+                ras_coords = [0, 0, 0, 1]
+                ijk_coords = [centroid_i, centroid_j, centroid_k, 1]
+                ijk_to_ras.MultiplyPoint(ijk_coords, ras_coords)
+                self.logger.info(f"Centroid in RAS coords: [{ras_coords[0]}, {ras_coords[1]}, {ras_coords[2]}]")
+                
+                # Check volume bounds
+                bounds = [0, 0, 0, 0, 0, 0]
+                volume_node.GetRASBounds(bounds)
+                self.logger.info(f"Volume RAS bounds: {bounds}")
+                
+                # Check if centroid is inside bounds
+                inside_x = bounds[0] <= ras_coords[0] <= bounds[1]
+                inside_y = bounds[2] <= ras_coords[1] <= bounds[3]
+                inside_z = bounds[4] <= ras_coords[2] <= bounds[5]
+                self.logger.info(f"Centroid inside bounds: x={inside_x}, y={inside_y}, z={inside_z}")
+                
+            # Direct vtkImageData
+            elif 'vtkImageData' in class_name:
+                self.logger.info("Volume node is a vtkImageData")
+                
+                spacing = volume_node.GetSpacing()
+                origin = volume_node.GetOrigin()
+                dimensions = volume_node.GetDimensions()
+                self.logger.info(f"Image spacing: {spacing}")
+                self.logger.info(f"Image origin: {origin}")
+                self.logger.info(f"Image dimensions: {dimensions}")
+                
+                # Calculate approximate RAS coordinates
+                approx_x = origin[0] + centroid_i * spacing[0]
+                approx_y = origin[1] + centroid_j * spacing[1]
+                approx_z = origin[2] + centroid_k * spacing[2]
+                self.logger.info(f"Approximate centroid in physical coords: [{approx_x}, {approx_y}, {approx_z}]")
+                
+                # Get image extent
+                extent = volume_node.GetExtent()
+                self.logger.info(f"Image extent: {extent}")
+            else:
+                self.logger.warning(f"Unknown volume node class: {class_name}")
+        else:
+            self.logger.warning("Volume node has no GetClassName method - cannot determine type")
     
 def visualize_critical_points(vertebra):
     """
