@@ -1109,22 +1109,9 @@ class ScrewStep(PedicleScrewSimulatorStep):
             # Export segments to labelmap
             segmentationLogic = slicer.modules.segmentations.logic()
             
-            # Create a segmentation export node to handle the conversion
-            exportNode = slicer.vtkMRMLSegmentationNode()
-            slicer.mrmlScene.AddNode(exportNode)
-            
-            # Copy segments to the temporary export node
-            exportNode.Copy(segmentation)
-            
-            # Generate binary labelmap representation for the export node
-            exportNode.CreateBinaryLabelmapRepresentation()
-            
             # Export to labelmap node with reference geometry from input volume
             success = segmentationLogic.ExportVisibleSegmentsToLabelmapNode(
-                exportNode, labelmapNode, inputVolume)
-            
-            # Remove the temporary export node
-            slicer.mrmlScene.RemoveNode(exportNode)
+                segmentation, labelmapNode, inputVolume)
             
             if not success:
                 progressDialog.close()
@@ -1143,21 +1130,14 @@ class ScrewStep(PedicleScrewSimulatorStep):
             self.fidNode.GetNthControlPointPosition(self.currentFidIndex, insertion_coords)
             
             try:
-                # Get the image data
-                labelMapVolumeData = labelmapNode.GetImageData()
-                inputVolumeData = inputVolume.GetImageData()
-                
-                vertebra = Vertebra(labelmapNode, inputVolumeData, insertion_coords)
+                # IMPORTANT FIX: Use the actual MRML volume node for processing
+                # Previously it was trying to use inputVolumeData (vtkImageData) which doesn't have transformation methods
+                vertebra = Vertebra(labelmapNode, inputVolume, insertion_coords)
                 progressDialog.setValue(30)
                 slicer.app.processEvents()
 
-                # In runAutoPlanning after creating the vertebra object
-                if hasattr(vertebra, 'centroid'):
-                    logging.info(f"Vertebra centroid: {vertebra.centroid}")
-                else:
-                    logging.warning("Vertebra has no centroid attribute")
-
                 # Visualize critical points
+                from .Vertebra import visualize_critical_points
                 debug_fiducials = visualize_critical_points(vertebra)
                 
                 # Initialize auto planner if not already done
@@ -1167,7 +1147,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
                 if not self.autoPlanner:
                     from .AutoPlanner import PedicleScrewAutoPlanner
                     
-                    # Create a custom progress update callback
+                    # Create a custom progress update callback that works with different Qt versions
                     def progress_callback(phase, iteration, max_iterations):
                         if phase == 1:  # First joint search
                             # Map progress from 0-100% of first phase to 40-60% of overall progress
@@ -1180,13 +1160,20 @@ class ScrewStep(PedicleScrewSimulatorStep):
                         progressDialog.setLabelText(f"Searching {phase}/2: {iteration}/{max_iterations}")
                         slicer.app.processEvents()
                         
-                        # Check for cancel button
-                        if hasattr(progressDialog, 'wasCanceled'):
-                            if callable(progressDialog.wasCanceled):
+                        # Check for cancel button - handle both property and method cases
+                        try:
+                            # Try as a method first
+                            if hasattr(progressDialog, 'wasCanceled') and callable(getattr(progressDialog, 'wasCanceled')):
                                 return progressDialog.wasCanceled()
+                            # Then try as a property
+                            elif hasattr(progressDialog, 'wasCanceled'):
+                                return bool(progressDialog.wasCanceled)
+                            # Fallback
                             else:
-                                return progressDialog.wasCanceled
-                        return False
+                                return False
+                        except Exception as e:
+                            logging.error(f"Error checking cancel status: {str(e)}")
+                            return False
                     
                     self.autoPlanner = PedicleScrewAutoPlanner(
                         resolution=200,  # Lower resolution for faster results
@@ -1206,13 +1193,20 @@ class ScrewStep(PedicleScrewSimulatorStep):
                         progressDialog.setLabelText(f"Searching {phase}/2: {iteration}/{max_iterations}")
                         slicer.app.processEvents()
                         
-                        # Check for cancel button
-                        if hasattr(progressDialog, 'wasCanceled'):
-                            if callable(progressDialog.wasCanceled):
+                        # Check for cancel button - handle both property and method cases
+                        try:
+                            # Try as a method first
+                            if hasattr(progressDialog, 'wasCanceled') and callable(getattr(progressDialog, 'wasCanceled')):
                                 return progressDialog.wasCanceled()
+                            # Then try as a property
+                            elif hasattr(progressDialog, 'wasCanceled'):
+                                return bool(progressDialog.wasCanceled)
+                            # Fallback
                             else:
-                                return progressDialog.wasCanceled
-                        return False
+                                return False
+                        except Exception as e:
+                            logging.error(f"Error checking cancel status: {str(e)}")
+                            return False
                     
                     self.autoPlanner.progress_callback = progress_callback
                 
@@ -1222,7 +1216,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
                 slicer.app.processEvents()
                 
                 # Run the actual planning
-                _, angles, _ = self.autoPlanner.plan_trajectory(vertebra, insertion_coords)
+                final_traj, angles, cost = self.autoPlanner.plan_trajectory(vertebra, insertion_coords)
                 vertical_angle, horizontal_angle = angles
                 
                 # Apply angles to the sliders
@@ -1254,7 +1248,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
             logging.error(traceback.format_exc())
             progressDialog.close()
             qt.QMessageBox.critical(None, "Error", f"Auto-planning failed: {str(e)}")
-    
+
         finally:
             progressDialog.close()
             if 'labelmapNode' in locals() and labelmapNode is not None:

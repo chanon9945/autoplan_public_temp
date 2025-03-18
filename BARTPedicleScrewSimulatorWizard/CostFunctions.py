@@ -6,16 +6,24 @@ logger = logging.getLogger(__name__)
 
 def bresenham_3d(origin, endpoint, matrix):
     """
-    Draw a 3D line between origin and endpoint in the voxel matrix using Bresenham's algorithm
-    Returns a binary mask where line voxels are 1 and others are 0
+    Draw a 3D line between origin and endpoint in the voxel matrix using Bresenham's algorithm.
+    Returns a binary mask where line voxels are 1 and others are 0.
+    
+    Parameters:
+        origin (array): [x, y, z] start point
+        endpoint (array): [x, y, z] end point
+        matrix (array): 3D numpy array representing the volume
+        
+    Returns:
+        array: Binary mask with same dimensions as matrix
     """
     try:
         # Get matrix dimensions
         matrix_size = matrix.shape
         
         # Round endpoints to integers
-        x1, y1, z1 = map(round, origin)
-        x2, y2, z2 = map(round, endpoint)
+        x1, y1, z1 = map(int, np.round(origin))
+        x2, y2, z2 = map(int, np.round(endpoint))
         
         # Calculate differences and signs
         dx = abs(x2 - x1)
@@ -27,11 +35,17 @@ def bresenham_3d(origin, endpoint, matrix):
         
         # Determine dominant axis
         if dx >= dy and dx >= dz:
-            nsteps = dx + 1
+            err_y = 2 * dy - dx
+            err_z = 2 * dz - dx
+            nsteps = dx
         elif dy >= dx and dy >= dz:
-            nsteps = dy + 1
+            err_x = 2 * dx - dy
+            err_z = 2 * dz - dy
+            nsteps = dy
         else:
-            nsteps = dz + 1
+            err_x = 2 * dx - dz
+            err_y = 2 * dy - dz
+            nsteps = dz
         
         # Create result matrix
         result = np.zeros(matrix_size, dtype=np.uint8)
@@ -39,68 +53,41 @@ def bresenham_3d(origin, endpoint, matrix):
         # Draw line using Bresenham's algorithm
         x, y, z = x1, y1, z1
         
-        # Error terms
-        if dx >= dy and dx >= dz:
-            err1 = 2*dy - dx
-            err2 = 2*dz - dx
-            
-            for i in range(nsteps):
-                # Set voxel if within bounds
-                if 0 <= x < matrix_size[0] and 0 <= y < matrix_size[1] and 0 <= z < matrix_size[2]:
-                    result[x, y, z] = 1
-                    
-                # Update coordinates
-                if err1 > 0:
-                    y += sy
-                    err1 -= 2*dx
-                if err2 > 0:
-                    z += sz
-                    err2 -= 2*dx
+        for i in range(nsteps + 1):
+            # Check if point is within bounds
+            if 0 <= x < matrix_size[0] and 0 <= y < matrix_size[1] and 0 <= z < matrix_size[2]:
+                result[x, y, z] = 1
                 
-                err1 += 2*dy
-                err2 += 2*dz
+            # Update coordinates based on dominant axis
+            if dx >= dy and dx >= dz:
+                if err_y >= 0:
+                    y += sy
+                    err_y -= 2 * dx
+                if err_z >= 0:
+                    z += sz
+                    err_z -= 2 * dx
+                err_y += 2 * dy
+                err_z += 2 * dz
                 x += sx
-                
-        elif dy >= dx and dy >= dz:
-            err1 = 2*dx - dy
-            err2 = 2*dz - dy
-            
-            for i in range(nsteps):
-                # Set voxel if within bounds
-                if 0 <= x < matrix_size[0] and 0 <= y < matrix_size[1] and 0 <= z < matrix_size[2]:
-                    result[x, y, z] = 1
-                    
-                # Update coordinates
-                if err1 > 0:
+            elif dy >= dx and dy >= dz:
+                if err_x >= 0:
                     x += sx
-                    err1 -= 2*dy
-                if err2 > 0:
+                    err_x -= 2 * dy
+                if err_z >= 0:
                     z += sz
-                    err2 -= 2*dy
-                
-                err1 += 2*dx
-                err2 += 2*dz
+                    err_z -= 2 * dy
+                err_x += 2 * dx
+                err_z += 2 * dz
                 y += sy
-                
-        else:
-            err1 = 2*dx - dz
-            err2 = 2*dy - dz
-            
-            for i in range(nsteps):
-                # Set voxel if within bounds
-                if 0 <= x < matrix_size[0] and 0 <= y < matrix_size[1] and 0 <= z < matrix_size[2]:
-                    result[x, y, z] = 1
-                    
-                # Update coordinates
-                if err1 > 0:
+            else:
+                if err_x >= 0:
                     x += sx
-                    err1 -= 2*dz
-                if err2 > 0:
+                    err_x -= 2 * dz
+                if err_y >= 0:
                     y += sy
-                    err2 -= 2*dz
-                
-                err1 += 2*dx
-                err2 += 2*dy
+                    err_y -= 2 * dz
+                err_x += 2 * dx
+                err_y += 2 * dy
                 z += sz
         
         return result
@@ -112,8 +99,15 @@ def bresenham_3d(origin, endpoint, matrix):
 
 def find_closest_point_to_line(pt_cloud, line_origin, line_direction):
     """
-    Find the closest point in pt_cloud to the line defined by origin and direction
-    Returns the closest point and its distance to the line
+    Find the closest point in pt_cloud to the line defined by origin and direction.
+    
+    Parameters:
+        pt_cloud (vtkPolyData): Point cloud to search
+        line_origin (array): [x, y, z] origin of the line
+        line_direction (array): Direction vector of the line
+        
+    Returns:
+        tuple: (closest_point, min_distance)
     """
     try:
         # Normalize direction vector
@@ -124,14 +118,14 @@ def find_closest_point_to_line(pt_cloud, line_origin, line_direction):
             
         line_direction = line_direction / direction_mag
         
-        # Get point cloud data
+        # Validate point cloud
         if not pt_cloud or not hasattr(pt_cloud, 'GetPoints'):
             logger.warning("Invalid point cloud object")
             return line_origin, float('inf')
             
         points_vtk = pt_cloud.GetPoints()
         if not points_vtk or points_vtk.GetNumberOfPoints() == 0:
-            logger.warning("Empty point cloud")
+            logger.warning("Empty point cloud or no points found")
             return line_origin, float('inf')
             
         # Convert VTK points to numpy array
@@ -157,6 +151,7 @@ def find_closest_point_to_line(pt_cloud, line_origin, line_direction):
         min_distance = distances[min_idx]
         closest_point = points[min_idx]
         
+        logger.debug(f"Closest point found at distance: {min_distance}")
         return closest_point, min_distance
         
     except Exception as e:
@@ -165,9 +160,27 @@ def find_closest_point_to_line(pt_cloud, line_origin, line_direction):
 
 def point_to_line_distance(point, line_origin, line_direction):
     """
-    Calculate the perpendicular distance from a point to a line
+    Calculate the perpendicular distance from a point to a line.
+    
+    Parameters:
+        point (array): [x, y, z] point to measure from
+        line_origin (array): [x, y, z] origin of the line
+        line_direction (array): Direction vector of the line
+        
+    Returns:
+        float: Distance from point to line
     """
     try:
+        # Validate inputs
+        if point is None or line_origin is None or line_direction is None:
+            logger.warning("Invalid inputs to point_to_line_distance")
+            return float('inf')
+            
+        # Convert to numpy arrays if not already
+        point = np.array(point)
+        line_origin = np.array(line_origin)
+        line_direction = np.array(line_direction)
+        
         # Normalize direction vector
         direction_mag = np.linalg.norm(line_direction)
         if direction_mag < 1e-6:
@@ -190,12 +203,25 @@ def point_to_line_distance(point, line_origin, line_direction):
 
 def gen_traj(origin_transform, target_transform):
     """
-    Generate trajectory vector from origin to target
+    Generate trajectory vector from origin to target.
+    
+    Parameters:
+        origin_transform (array): 4x4 homogeneous transform for origin
+        target_transform (array): 4x4 homogeneous transform for target
+        
+    Returns:
+        array: Normalized direction vector
     """
     try:
+        # Get translation components from transforms
+        if origin_transform.shape != (4, 4) or target_transform.shape != (4, 4):
+            logger.warning(f"Invalid transform shapes: {origin_transform.shape}, {target_transform.shape}")
+            return np.array([0, 1, 0])  # Default direction
+            
         origin_pos = origin_transform[0:3, 3]
         target_pos = target_transform[0:3, 3]
         
+        # Calculate direction vector
         direction = target_pos - origin_pos
         direction_mag = np.linalg.norm(direction)
         
@@ -208,6 +234,107 @@ def gen_traj(origin_transform, target_transform):
     except Exception as e:
         logger.error(f"Error in gen_traj: {str(e)}")
         return np.array([0, 1, 0])  # Default to anterior direction
+
+def sample_ct_along_trajectory(volume_node, origin, direction, length, num_samples=50):
+    """
+    Sample CT values along a trajectory line.
+    
+    Parameters:
+        volume_node (vtkMRMLScalarVolumeNode): CT volume node
+        origin (array): [x, y, z] start point in RAS
+        direction (array): Normalized direction vector
+        length (float): Length of trajectory
+        num_samples (int): Number of points to sample
+        
+    Returns:
+        array: Array of sampled density values
+    """
+    try:
+        if not volume_node or not hasattr(volume_node, 'GetImageData'):
+            logger.warning("Invalid volume node")
+            return np.array([])
+            
+        # Get image data
+        image_data = volume_node.GetImageData()
+        if not image_data:
+            logger.warning("No image data in volume node")
+            return np.array([])
+            
+        # Get RAS to IJK transform
+        ras_to_ijk = vtk.vtkMatrix4x4()
+        volume_node.GetRASToIJKMatrix(ras_to_ijk)
+        
+        # Sample points along trajectory
+        density_values = []
+        
+        for i in range(num_samples):
+            t = i / (num_samples - 1)
+            point_ras = origin + t * direction * length
+            
+            # Convert RAS to IJK
+            point_ijk = np.zeros(4)
+            ras_point = np.append(point_ras, 1.0)
+            ras_to_ijk.MultiplyPoint(ras_point, point_ijk)
+            
+            # Convert to integer voxel coordinates
+            ijk = [int(round(point_ijk[j])) for j in range(3)]
+            
+            # Check if point is within volume bounds
+            dims = image_data.GetDimensions()
+            if (0 <= ijk[0] < dims[0] and 
+                0 <= ijk[1] < dims[1] and 
+                0 <= ijk[2] < dims[2]):
+                
+                # Get voxel value (HU)
+                value = image_data.GetScalarComponentAsDouble(ijk[0], ijk[1], ijk[2], 0)
+                density_values.append(value)
+        
+        return np.array(density_values)
+        
+    except Exception as e:
+        logger.error(f"Error in sample_ct_along_trajectory: {str(e)}")
+        return np.array([])
+
+def compute_safety_margin(trajectory_points, vertebra_model):
+    """
+    Compute the safety margin between trajectory and vertebra surface.
+    
+    Parameters:
+        trajectory_points (array): Array of points along trajectory
+        vertebra_model (vtkPolyData): Surface model of vertebra
+        
+    Returns:
+        float: Minimum distance from trajectory to surface
+    """
+    try:
+        if not vertebra_model or not hasattr(vertebra_model, 'GetPoints'):
+            logger.warning("Invalid vertebra model")
+            return 0.0
+            
+        # Create a locator for fast distance queries
+        locator = vtk.vtkPointLocator()
+        locator.SetDataSet(vertebra_model)
+        locator.BuildLocator()
+        
+        # Find minimum distance from trajectory to surface
+        min_distance = float('inf')
+        
+        for point in trajectory_points:
+            # Find closest point
+            id = locator.FindClosestPoint(point)
+            if id >= 0:
+                surface_point = vertebra_model.GetPoint(id)
+                distance = np.linalg.norm(np.array(point) - np.array(surface_point))
+                min_distance = min(min_distance, distance)
+        
+        if min_distance == float('inf'):
+            min_distance = 0.0
+            
+        return min_distance
+        
+    except Exception as e:
+        logger.error(f"Error in compute_safety_margin: {str(e)}")
+        return 0.0
 
 def cost_total(
     insertion_point, 
@@ -233,134 +360,177 @@ def cost_total(
         trajectory_length (float): Maximum length of trajectory
         
     Returns:
-        float: Combined weighted cost (lower is better)
+        tuple: (total_cost, cost_components)
     """
     cost_components = {}
     
+    # Validate inputs
+    if insertion_point is None or np.any(np.isnan(insertion_point)):
+        logger.warning("Invalid insertion point")
+        return float('inf'), {"error": "Invalid insertion point"}
+        
+    if trajectory_direction is None or np.any(np.isnan(trajectory_direction)):
+        logger.warning("Invalid trajectory direction")
+        return float('inf'), {"error": "Invalid trajectory direction"}
+        
+    if pedicle_center is None or np.any(np.isnan(pedicle_center)):
+        logger.warning("Invalid pedicle center")
+        pedicle_center = insertion_point  # Fallback
+    
     # 1. Cost based on alignment with pedicle axis
     # Higher alignment = lower cost
-    pedicle_axis_norm = np.linalg.norm(pedicle_axis)
-    if pedicle_axis_norm > 1e-6:
-        pedicle_axis = pedicle_axis / pedicle_axis_norm
+    try:
+        pedicle_axis_norm = np.linalg.norm(pedicle_axis)
+        if pedicle_axis_norm > 1e-6:
+            pedicle_axis = pedicle_axis / pedicle_axis_norm
+            # Use absolute value of dot product to handle opposite directions
+            alignment = np.abs(np.dot(trajectory_direction, pedicle_axis))
+            angle_cost = np.arccos(np.clip(alignment, -1.0, 1.0))
+        else:
+            logger.warning("Pedicle axis is too short")
+            angle_cost = np.pi/2  # 90 degrees = worst case
+    except Exception as e:
+        logger.error(f"Error calculating angle cost: {str(e)}")
+        angle_cost = np.pi/2
         
-    angle_cost = np.arccos(np.abs(np.dot(trajectory_direction, pedicle_axis)))
     cost_components['angle'] = angle_cost
     
     # 2. Cost based on distance from pedicle center
-    # Calculate distance from pedicle center to trajectory line
-    center_to_insertion = pedicle_center - insertion_point
-    projection = np.dot(center_to_insertion, trajectory_direction)
-    closest_point = insertion_point + projection * trajectory_direction
-    distance_cost = np.linalg.norm(pedicle_center - closest_point)
+    try:
+        distance_cost = point_to_line_distance(pedicle_center, insertion_point, trajectory_direction)
+    except Exception as e:
+        logger.error(f"Error calculating distance cost: {str(e)}")
+        distance_cost = trajectory_length  # Worst case
+        
     cost_components['distance'] = distance_cost
     
     # 3. Cost based on safety margin from vertebra surface
-    # Use vtkDistancePolyDataFilter to find closest distance
+    safety_cost = 0.0
+    
     if vertebra_model and hasattr(vertebra_model, 'GetPoints') and vertebra_model.GetPoints():
-        # Create a line representation
-        line_points = vtk.vtkPoints()
-        line_points.InsertNextPoint(insertion_point)
-        end_point = insertion_point + trajectory_direction * trajectory_length
-        line_points.InsertNextPoint(end_point)
-        
-        line_cells = vtk.vtkCellArray()
-        line = vtk.vtkLine()
-        line.GetPointIds().SetId(0, 0)
-        line.GetPointIds().SetId(1, 1)
-        line_cells.InsertNextCell(line)
-        
-        trajectory_polydata = vtk.vtkPolyData()
-        trajectory_polydata.SetPoints(line_points)
-        trajectory_polydata.SetLines(line_cells)
-        
-        # Use distance filter
-        distance_filter = vtk.vtkDistancePolyDataFilter()
-        distance_filter.SetInputData(0, trajectory_polydata)
-        distance_filter.SetInputData(1, vertebra_model)
-        distance_filter.SignedDistanceOff()
-        distance_filter.Update()
-        
-        # Get minimum distance
-        output = distance_filter.GetOutput()
-        distances = vtk.util.numpy_support.vtk_to_numpy(
-            output.GetPointData().GetArray('Distance')
-        )
-        safety_cost = np.min(distances) if distances.size > 0 else trajectory_length
-        
-        # Invert: smaller distance = higher cost
-        if safety_cost < 1.0:  # If too close to surface
-            safety_cost = 1.0 / max(safety_cost, 0.1)  # Avoid division by zero
+        # Check if the vertebra model actually has points
+        if vertebra_model.GetNumberOfPoints() > 0:
+            try:
+                # Sample points along trajectory
+                num_points = 20
+                trajectory_points = []
+                for i in range(num_points):
+                    t = i / (num_points - 1)
+                    point = insertion_point + t * trajectory_direction * trajectory_length
+                    trajectory_points.append(point)
+                    
+                # Create trajectory polydata
+                points_vtk = vtk.vtkPoints()
+                for point in trajectory_points:
+                    points_vtk.InsertNextPoint(point)
+                    
+                line_cells = vtk.vtkCellArray()
+                for i in range(len(trajectory_points) - 1):
+                    line = vtk.vtkLine()
+                    line.GetPointIds().SetId(0, i)
+                    line.GetPointIds().SetId(1, i + 1)
+                    line_cells.InsertNextCell(line)
+                    
+                traj_polydata = vtk.vtkPolyData()
+                traj_polydata.SetPoints(points_vtk)
+                traj_polydata.SetLines(line_cells)
+                
+                # Make sure both trajectory and vertebra model have points
+                if traj_polydata.GetNumberOfPoints() > 0 and vertebra_model.GetNumberOfPoints() > 0:
+                    # Use a simpler approach with vtkPointLocator instead of vtkDistancePolyDataFilter
+                    # since the filter can have issues with empty datasets
+                    locator = vtk.vtkPointLocator()
+                    locator.SetDataSet(vertebra_model)
+                    locator.BuildLocator()
+                    
+                    min_distance = float('inf')
+                    for point in trajectory_points:
+                        id = locator.FindClosestPoint(point)
+                        if id >= 0:
+                            closest_point = vertebra_model.GetPoint(id)
+                            distance = np.linalg.norm(np.array(point) - np.array(closest_point))
+                            min_distance = min(min_distance, distance)
+                    
+                    if min_distance != float('inf'):
+                        # Invert: smaller distance = higher cost (with safety threshold)
+                        safety_threshold = 1.0  # mm
+                        if min_distance < safety_threshold:
+                            safety_cost = safety_threshold / max(min_distance, 0.1)  # Avoid division by zero
+                        else:
+                            safety_cost = 0.0  # Safe distance
+                    else:
+                        safety_cost = 0.0
+                else:
+                    logger.warning("Trajectory or vertebra model has no points")
+            except Exception as e:
+                logger.error(f"Error calculating safety cost: {str(e)}")
+                safety_cost = 0.0  # Default to neutral cost
         else:
-            safety_cost = 0.0  # Safe distance
-    else:
-        safety_cost = 0.0
+            logger.warning("Vertebra model has no points")
+    
     cost_components['safety'] = safety_cost
     
     # 4. Cost based on bone density along trajectory
-    # Sample the CT volume along the trajectory
+    density_cost = 0.0
     if volume_node:
-        # Get image data
-        image_data = volume_node.GetImageData()
-        
-        # Get RAS to IJK transform
-        ras_to_ijk = vtk.vtkMatrix4x4()
-        volume_node.GetRASToIJKMatrix(ras_to_ijk)
-        
-        # Sample points along trajectory
-        num_samples = 50
-        density_values = []
-        
-        for i in range(num_samples):
-            t = i / (num_samples - 1)
-            point_ras = insertion_point + t * trajectory_direction * trajectory_length
+        try:
+            # Sample CT along trajectory
+            density_values = sample_ct_along_trajectory(
+                volume_node, insertion_point, trajectory_direction, trajectory_length)
             
-            # Convert RAS to IJK
-            point_ijk = [0, 0, 0, 1]
-            ras_to_ijk.MultiplyPoint(np.append(point_ras, 1.0), point_ijk)
-            
-            # Convert to integer voxel coordinates
-            ijk = [int(round(point_ijk[j])) for j in range(3)]
-            
-            # Check if point is within volume bounds
-            dims = image_data.GetDimensions()
-            if (0 <= ijk[0] < dims[0] and 
-                0 <= ijk[1] < dims[1] and 
-                0 <= ijk[2] < dims[2]):
+            if len(density_values) > 0:
+                # Define target HU ranges for different bone types
+                soft_tissue_range = (-100, 135)  # Avoid
+                cancellous_bone_range = (135, 375)  # Preferred
+                cortical_bone_range = (375, 1200)  # OK in moderation
                 
-                # Get voxel value (HU)
-                value = image_data.GetScalarComponentAsDouble(ijk[0], ijk[1], ijk[2], 0)
-                density_values.append(value)
-        
-        # Calculate mean density along trajectory
-        if density_values:
-            # Define target range for bone (e.g., trabecular bone is ~200-400 HU)
-            min_target_hu = 200
-            max_target_hu = 400
-            
-            # Convert to numpy array for easier calculation
-            density_array = np.array(density_values)
-            
-            # Count voxels in target range (good density)
-            good_density_count = np.sum((density_array >= min_target_hu) & 
-                                       (density_array <= max_target_hu))
-            
-            # Calculate percentage of trajectory in good bone
-            good_density_ratio = good_density_count / len(density_values)
-            
-            # Invert: higher good density ratio = lower cost
-            density_cost = 1.0 - good_density_ratio
-        else:
-            density_cost = 1.0  # Maximum cost if no samples
-    else:
-        density_cost = 0.0
+                # Calculate percentage in each range
+                n_samples = len(density_values)
+                soft_tissue_count = np.sum((density_values >= soft_tissue_range[0]) & 
+                                          (density_values < soft_tissue_range[1]))
+                cancellous_count = np.sum((density_values >= cancellous_bone_range[0]) & 
+                                         (density_values < cancellous_bone_range[1]))
+                cortical_count = np.sum((density_values >= cortical_bone_range[0]) & 
+                                       (density_values < cortical_bone_range[1]))
+                
+                # Calculate density score (higher is better)
+                if n_samples > 0:
+                    # Preferred: high percentage of cancellous bone, limited cortical, minimal soft tissue
+                    cancellous_ratio = cancellous_count / n_samples
+                    cortical_ratio = cortical_count / n_samples
+                    soft_tissue_ratio = soft_tissue_count / n_samples
+                    
+                    # Density score (0 to 1, higher is better)
+                    density_score = (
+                        1.0 * cancellous_ratio +  # Full weight for cancellous
+                        0.5 * cortical_ratio -    # Partial weight for cortical
+                        1.0 * soft_tissue_ratio   # Penalty for soft tissue
+                    )
+                    
+                    # Constrain to 0-1 range and invert (lower is better for cost)
+                    density_score = np.clip(density_score, 0.0, 1.0)
+                    density_cost = 1.0 - density_score
+                else:
+                    density_cost = 1.0  # Maximum cost if no samples
+            else:
+                density_cost = 1.0  # Maximum cost if no density values
+        except Exception as e:
+            logger.error(f"Error calculating density cost: {str(e)}")
+            density_cost = 0.5  # Neutral cost
+    
     cost_components['density'] = density_cost
     
     # Calculate weighted sum
-    total_cost = (
-        weights[0] * cost_components['distance'] +
-        weights[1] * cost_components['angle'] +
-        weights[2] * cost_components['safety'] +
-        weights[3] * cost_components['density']
-    )
+    try:
+        total_cost = (
+            weights[0] * cost_components['distance'] +
+            weights[1] * cost_components['angle'] +
+            weights[2] * cost_components['safety'] +
+            weights[3] * cost_components['density']
+        )
+    except Exception as e:
+        logger.error(f"Error calculating total cost: {str(e)}")
+        total_cost = float('inf')
     
+    logger.debug(f"Cost components: {cost_components}, Total: {total_cost}")
     return total_cost, cost_components
