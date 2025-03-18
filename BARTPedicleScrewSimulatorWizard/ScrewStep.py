@@ -1121,7 +1121,16 @@ class ScrewStep(PedicleScrewSimulatorStep):
             progressDialog.setValue(20)
             slicer.app.processEvents()
             
-            # Create the Vertebra object
+            # Extract target level from the fiducial label
+            target_level = None
+            if self.currentFidLabel:
+                # Parse level from label like "Fid1 - L4 - Right"
+                parts = self.currentFidLabel.split(" - ")
+                if len(parts) >= 2:
+                    target_level = parts[1].strip()
+                    logging.info(f"Target level extracted from fiducial: {target_level}")
+            
+            # Create the Vertebra object with target level
             progressDialog.setLabelText("Processing vertebra geometry...")
             slicer.app.processEvents()
             
@@ -1130,9 +1139,8 @@ class ScrewStep(PedicleScrewSimulatorStep):
             self.fidNode.GetNthControlPointPosition(self.currentFidIndex, insertion_coords)
             
             try:
-                # IMPORTANT FIX: Use the actual MRML volume node for processing
-                # Previously it was trying to use inputVolumeData (vtkImageData) which doesn't have transformation methods
-                vertebra = Vertebra(labelmapNode, inputVolume, insertion_coords)
+                # Create vertebra with target level
+                vertebra = Vertebra(labelmapNode, inputVolume, insertion_coords, target_level)
                 progressDialog.setValue(30)
                 slicer.app.processEvents()
 
@@ -1233,7 +1241,12 @@ class ScrewStep(PedicleScrewSimulatorStep):
                 
                 # Clean up
                 slicer.mrmlScene.RemoveNode(labelmapNode)
-                qt.QMessageBox.information(None, "Auto-Planning", f"Trajectory planning completed successfully.\nVertical angle: {vertical_angle:.1f}°\nHorizontal angle: {horizontal_angle:.1f}°")
+                qt.QMessageBox.information(None, "Auto-Planning", 
+                                        f"Trajectory planning completed successfully.\n"
+                                        f"Vertical angle: {vertical_angle:.1f}°\n"
+                                        f"Horizontal angle: {horizontal_angle:.1f}°\n"
+                                        f"Level: {target_level}\n"
+                                        f"Cost: {cost:.2f}")
                 
             except Exception as e:
                 logging.error(f"Vertebra processing error: {str(e)}")
