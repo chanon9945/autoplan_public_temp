@@ -161,6 +161,7 @@ def find_closest_point_to_line(pt_cloud, line_origin, line_direction):
 def point_to_line_distance(point, line_origin, line_direction):
     """
     Calculate the perpendicular distance from a point to a line.
+    This function includes detailed debugging to trace the calculation.
     
     Parameters:
         point (array): [x, y, z] point to measure from
@@ -170,16 +171,26 @@ def point_to_line_distance(point, line_origin, line_direction):
     Returns:
         float: Distance from point to line
     """
+    import numpy as np
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
     try:
-        # Validate inputs
+        # Validate inputs and convert to numpy arrays
         if point is None or line_origin is None or line_direction is None:
             logger.warning("Invalid inputs to point_to_line_distance")
             return float('inf')
             
-        # Convert to numpy arrays if not already
-        point = np.array(point)
-        line_origin = np.array(line_origin)
-        line_direction = np.array(line_direction)
+        point = np.array(point, dtype=np.float64)
+        line_origin = np.array(line_origin, dtype=np.float64)
+        line_direction = np.array(line_direction, dtype=np.float64)
+        
+        # Debug inputs
+        logger.debug(f"point_to_line_distance inputs:")
+        logger.debug(f"  point: {point}")
+        logger.debug(f"  line_origin: {line_origin}")
+        logger.debug(f"  line_direction: {line_direction}")
         
         # Normalize direction vector
         direction_mag = np.linalg.norm(line_direction)
@@ -187,18 +198,48 @@ def point_to_line_distance(point, line_origin, line_direction):
             logger.warning("Line direction vector is too short")
             return float('inf')
             
-        line_direction = line_direction / direction_mag
+        normalized_direction = line_direction / direction_mag
+        logger.debug(f"  normalized_direction: {normalized_direction}")
         
-        # Vector from origin to point
+        # Vector from line origin to the point
         vec_to_point = point - line_origin
+        logger.debug(f"  vec_to_point: {vec_to_point}")
         
-        # Cross product gives perpendicular distance
-        cross_product = np.cross(vec_to_point, line_direction)
+        # Method 1: Cross product
+        # The cross product gives a vector perpendicular to both input vectors,
+        # with magnitude equal to the area of the parallelogram they form.
+        # The perpendicular distance is this area divided by the magnitude of the line direction.
+        cross_product = np.cross(vec_to_point, normalized_direction)
+        distance1 = np.linalg.norm(cross_product)
+        logger.debug(f"  cross_product: {cross_product}")
+        logger.debug(f"  distance (cross product method): {distance1}")
         
-        return np.linalg.norm(cross_product)
+        # Method 2: Projection
+        # Project the vector onto the line direction, then use Pythagoras to find the perpendicular component
+        dot_product = np.dot(vec_to_point, normalized_direction)
+        projection = normalized_direction * dot_product
+        perpendicular_vector = vec_to_point - projection
+        distance2 = np.linalg.norm(perpendicular_vector)
+        logger.debug(f"  dot_product: {dot_product}")
+        logger.debug(f"  projection: {projection}")
+        logger.debug(f"  perpendicular_vector: {perpendicular_vector}")
+        logger.debug(f"  distance (projection method): {distance2}")
+        
+        # Method 3: Formula d = |v × w| / |w|
+        # Where v is vec_to_point and w is normalized_direction
+        # Since w is already normalized, this simplifies to d = |v × w|
+        cross_magnitude = np.linalg.norm(np.cross(vec_to_point, normalized_direction))
+        distance3 = cross_magnitude
+        logger.debug(f"  distance (formula method): {distance3}")
+        
+        # The results from all methods should be identical (within floating point precision)
+        # Return the result from Method 2 (most explicit)
+        return distance2
         
     except Exception as e:
         logger.error(f"Error in point_to_line_distance: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         return float('inf')
 
 def gen_traj(origin_transform, target_transform):
@@ -212,11 +253,16 @@ def gen_traj(origin_transform, target_transform):
     Returns:
         array: Normalized direction vector
     """
+    import numpy as np
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
     try:
         # Get translation components from transforms
         if origin_transform.shape != (4, 4) or target_transform.shape != (4, 4):
             logger.warning(f"Invalid transform shapes: {origin_transform.shape}, {target_transform.shape}")
-            return np.array([0, 1, 0])  # Default direction
+            return np.array([0, 1, 0])  # Default direction (anterior)
             
         origin_pos = origin_transform[0:3, 3]
         target_pos = target_transform[0:3, 3]
@@ -233,6 +279,8 @@ def gen_traj(origin_transform, target_transform):
         
     except Exception as e:
         logger.error(f"Error in gen_traj: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         return np.array([0, 1, 0])  # Default to anterior direction
 
 def sample_ct_along_trajectory(volume_node, origin, direction, length, num_samples=50):
@@ -335,6 +383,92 @@ def compute_safety_margin(trajectory_points, vertebra_model):
     except Exception as e:
         logger.error(f"Error in compute_safety_margin: {str(e)}")
         return 0.0
+    
+def distance_cost(insertion_point, trajectory_direction, pedicle_center):
+    """
+    Calculate only the distance cost component - how close is the trajectory to the pedicle center.
+    This function includes detailed debugging information.
+    
+    Parameters:
+        insertion_point (array): 3D coordinates of insertion point
+        trajectory_direction (array): Unit vector of trajectory direction
+        pedicle_center (array): 3D coordinates of pedicle center
+        
+    Returns:
+        float: Distance cost value
+    """
+    import numpy as np
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Validate inputs and convert to numpy arrays
+        if insertion_point is None or trajectory_direction is None or pedicle_center is None:
+            logger.warning("Invalid inputs to distance_cost")
+            return float('inf')
+            
+        insertion_point = np.array(insertion_point, dtype=np.float64)
+        trajectory_direction = np.array(trajectory_direction, dtype=np.float64)
+        pedicle_center = np.array(pedicle_center, dtype=np.float64)
+        
+        # Normalize the trajectory direction
+        direction_mag = np.linalg.norm(trajectory_direction)
+        if direction_mag < 1e-6:
+            logger.warning("Trajectory direction vector is too short")
+            return float('inf')
+            
+        normalized_direction = trajectory_direction / direction_mag
+        
+        # Debug inputs
+        logger.debug(f"distance_cost inputs:")
+        logger.debug(f"  insertion_point: {insertion_point}")
+        logger.debug(f"  normalized_direction: {normalized_direction}")
+        logger.debug(f"  pedicle_center: {pedicle_center}")
+        
+        # Vector from insertion point to pedicle center
+        vec_to_center = pedicle_center - insertion_point
+        logger.debug(f"  vec_to_center: {vec_to_center}")
+        
+        # Project this vector onto the trajectory direction
+        dot_product = np.dot(vec_to_center, normalized_direction)
+        projection = normalized_direction * dot_product
+        logger.debug(f"  dot_product: {dot_product}")
+        logger.debug(f"  projection: {projection}")
+        
+        # The perpendicular component is the difference
+        perpendicular_vector = vec_to_center - projection
+        logger.debug(f"  perpendicular_vector: {perpendicular_vector}")
+        
+        # The distance is the magnitude of this perpendicular component
+        distance = np.linalg.norm(perpendicular_vector)
+        logger.debug(f"  distance: {distance}")
+        
+        # Calculate the closest point on the trajectory to the pedicle center
+        closest_point = insertion_point + projection
+        logger.debug(f"  closest_point: {closest_point}")
+        
+        # If the dot product is negative, the projection is behind the insertion point
+        # (pedicle center is behind trajectory origin)
+        if dot_product < 0:
+            logger.debug("  projection is behind insertion point")
+            
+        # If distance is greater than a threshold, apply a penalty
+        # This helps avoid positions where the trajectory is very far from the pedicle
+        threshold = 20.0  # mm
+        if distance > threshold:
+            # Apply a quadratic penalty for distances beyond the threshold
+            penalty = 1.0 + ((distance - threshold) / threshold) ** 2
+            distance *= penalty
+            logger.debug(f"  applied distance penalty: {penalty}, adjusted distance: {distance}")
+        
+        return distance
+        
+    except Exception as e:
+        logger.error(f"Error in distance_cost: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return float('inf')
 
 def cost_total(
     insertion_point, 
@@ -347,190 +481,370 @@ def cost_total(
     trajectory_length
 ):
     """
-    Calculate the cost of a trajectory based on multiple criteria.
+    Calculate the cost of a trajectory based primarily on distance to pedicle center.
+    This function has been simplified to focus only on the distance cost for debugging.
     
     Parameters:
         insertion_point (array): 3D coordinates of insertion point
         trajectory_direction (array): Unit vector of trajectory direction
-        vertebra_model (vtkPolyData): Surface model of the vertebra
-        pedicle_axis (array): Principal axis of the pedicle from PCA
+        vertebra_model (vtkPolyData): Surface model of the vertebra (unused in distance-only mode)
+        pedicle_axis (array): Principal axis of the pedicle from PCA (unused in distance-only mode)
         pedicle_center (array): 3D coordinates of pedicle center
         weights (array): Weights for different cost components [distance, angle, boundary, density]
-        volume_node (vtkMRMLScalarVolumeNode): CT volume node
-        trajectory_length (float): Maximum length of trajectory
+        volume_node (vtkMRMLScalarVolumeNode): CT volume node (unused in distance-only mode)
+        trajectory_length (float): Maximum length of trajectory (unused in distance-only mode)
         
     Returns:
         tuple: (total_cost, cost_components)
     """
-    cost_components = {}
+    import numpy as np
+    import logging
     
-    # Validate inputs
+    logger = logging.getLogger(__name__)
+    cost_components = {"distance": 0.0, "angle": 0.0, "safety": 0.0, "density": 0.0}
+    
+    # Validate key inputs
     if insertion_point is None or np.any(np.isnan(insertion_point)):
         logger.warning("Invalid insertion point")
-        return float('inf'), {"error": "Invalid insertion point"}
+        return float('inf'), cost_components
         
     if trajectory_direction is None or np.any(np.isnan(trajectory_direction)):
         logger.warning("Invalid trajectory direction")
-        return float('inf'), {"error": "Invalid trajectory direction"}
+        return float('inf'), cost_components
         
     if pedicle_center is None or np.any(np.isnan(pedicle_center)):
         logger.warning("Invalid pedicle center")
-        pedicle_center = insertion_point  # Fallback
-    
-    # 1. Cost based on alignment with pedicle axis
-    # Higher alignment = lower cost
-    try:
-        pedicle_axis_norm = np.linalg.norm(pedicle_axis)
-        if pedicle_axis_norm > 1e-6:
-            pedicle_axis = pedicle_axis / pedicle_axis_norm
-            # Use absolute value of dot product to handle opposite directions
-            alignment = np.abs(np.dot(trajectory_direction, pedicle_axis))
-            angle_cost = np.arccos(np.clip(alignment, -1.0, 1.0))
+        if insertion_point is not None:
+            pedicle_center = insertion_point  # Fallback
         else:
-            logger.warning("Pedicle axis is too short")
-            angle_cost = np.pi/2  # 90 degrees = worst case
-    except Exception as e:
-        logger.error(f"Error calculating angle cost: {str(e)}")
-        angle_cost = np.pi/2
-        
-    cost_components['angle'] = angle_cost
+            return float('inf'), cost_components
     
-    # 2. Cost based on distance from pedicle center
+    # Calculate distance cost using the enhanced function
     try:
-        distance_cost = point_to_line_distance(pedicle_center, insertion_point, trajectory_direction)
+        from .CostFunctions import distance_cost
+        cost_components["distance"] = distance_cost(insertion_point, trajectory_direction, pedicle_center)
     except Exception as e:
-        logger.error(f"Error calculating distance cost: {str(e)}")
-        distance_cost = trajectory_length  # Worst case
+        logger.error(f"Error importing or calling distance_cost: {str(e)}")
         
-    cost_components['distance'] = distance_cost
-    
-    # 3. Cost based on safety margin from vertebra surface
-    safety_cost = 0.0
-    
-    if vertebra_model and hasattr(vertebra_model, 'GetPoints') and vertebra_model.GetPoints():
-        # Check if the vertebra model actually has points
-        if vertebra_model.GetNumberOfPoints() > 0:
-            try:
-                # Sample points along trajectory
-                num_points = 20
-                trajectory_points = []
-                for i in range(num_points):
-                    t = i / (num_points - 1)
-                    point = insertion_point + t * trajectory_direction * trajectory_length
-                    trajectory_points.append(point)
-                    
-                # Create trajectory polydata
-                points_vtk = vtk.vtkPoints()
-                for point in trajectory_points:
-                    points_vtk.InsertNextPoint(point)
-                    
-                line_cells = vtk.vtkCellArray()
-                for i in range(len(trajectory_points) - 1):
-                    line = vtk.vtkLine()
-                    line.GetPointIds().SetId(0, i)
-                    line.GetPointIds().SetId(1, i + 1)
-                    line_cells.InsertNextCell(line)
-                    
-                traj_polydata = vtk.vtkPolyData()
-                traj_polydata.SetPoints(points_vtk)
-                traj_polydata.SetLines(line_cells)
-                
-                # Make sure both trajectory and vertebra model have points
-                if traj_polydata.GetNumberOfPoints() > 0 and vertebra_model.GetNumberOfPoints() > 0:
-                    # Use a simpler approach with vtkPointLocator instead of vtkDistancePolyDataFilter
-                    # since the filter can have issues with empty datasets
-                    locator = vtk.vtkPointLocator()
-                    locator.SetDataSet(vertebra_model)
-                    locator.BuildLocator()
-                    
-                    min_distance = float('inf')
-                    for point in trajectory_points:
-                        id = locator.FindClosestPoint(point)
-                        if id >= 0:
-                            closest_point = vertebra_model.GetPoint(id)
-                            distance = np.linalg.norm(np.array(point) - np.array(closest_point))
-                            min_distance = min(min_distance, distance)
-                    
-                    if min_distance != float('inf'):
-                        # Invert: smaller distance = higher cost (with safety threshold)
-                        safety_threshold = 1.0  # mm
-                        if min_distance < safety_threshold:
-                            safety_cost = safety_threshold / max(min_distance, 0.1)  # Avoid division by zero
-                        else:
-                            safety_cost = 0.0  # Safe distance
-                    else:
-                        safety_cost = 0.0
-                else:
-                    logger.warning("Trajectory or vertebra model has no points")
-            except Exception as e:
-                logger.error(f"Error calculating safety cost: {str(e)}")
-                safety_cost = 0.0  # Default to neutral cost
-        else:
-            logger.warning("Vertebra model has no points")
-    
-    cost_components['safety'] = safety_cost
-    
-    # 4. Cost based on bone density along trajectory
-    density_cost = 0.0
-    if volume_node:
+        # Fallback direct implementation
         try:
-            # Sample CT along trajectory
-            density_values = sample_ct_along_trajectory(
-                volume_node, insertion_point, trajectory_direction, trajectory_length)
-            
-            if len(density_values) > 0:
-                # Define target HU ranges for different bone types
-                soft_tissue_range = (-100, 135)  # Avoid
-                cancellous_bone_range = (135, 375)  # Preferred
-                cortical_bone_range = (375, 1200)  # OK in moderation
-                
-                # Calculate percentage in each range
-                n_samples = len(density_values)
-                soft_tissue_count = np.sum((density_values >= soft_tissue_range[0]) & 
-                                          (density_values < soft_tissue_range[1]))
-                cancellous_count = np.sum((density_values >= cancellous_bone_range[0]) & 
-                                         (density_values < cancellous_bone_range[1]))
-                cortical_count = np.sum((density_values >= cortical_bone_range[0]) & 
-                                       (density_values < cortical_bone_range[1]))
-                
-                # Calculate density score (higher is better)
-                if n_samples > 0:
-                    # Preferred: high percentage of cancellous bone, limited cortical, minimal soft tissue
-                    cancellous_ratio = cancellous_count / n_samples
-                    cortical_ratio = cortical_count / n_samples
-                    soft_tissue_ratio = soft_tissue_count / n_samples
-                    
-                    # Density score (0 to 1, higher is better)
-                    density_score = (
-                        1.0 * cancellous_ratio +  # Full weight for cancellous
-                        0.5 * cortical_ratio -    # Partial weight for cortical
-                        1.0 * soft_tissue_ratio   # Penalty for soft tissue
-                    )
-                    
-                    # Constrain to 0-1 range and invert (lower is better for cost)
-                    density_score = np.clip(density_score, 0.0, 1.0)
-                    density_cost = 1.0 - density_score
-                else:
-                    density_cost = 1.0  # Maximum cost if no samples
+            # Normalize direction
+            direction_mag = np.linalg.norm(trajectory_direction)
+            if direction_mag < 1e-6:
+                logger.warning("Trajectory direction is too short")
+                cost_components["distance"] = float('inf')
             else:
-                density_cost = 1.0  # Maximum cost if no density values
-        except Exception as e:
-            logger.error(f"Error calculating density cost: {str(e)}")
-            density_cost = 0.5  # Neutral cost
+                normalized_direction = trajectory_direction / direction_mag
+                
+                # Calculate perpendicular distance
+                vec_to_center = pedicle_center - insertion_point
+                projection = np.dot(vec_to_center, normalized_direction) * normalized_direction
+                perpendicular_vector = vec_to_center - projection
+                cost_components["distance"] = np.linalg.norm(perpendicular_vector)
+        except Exception as e2:
+            logger.error(f"Error in fallback distance calculation: {str(e2)}")
+            cost_components["distance"] = float('inf')
     
-    cost_components['density'] = density_cost
+    # Log the cost components for debugging
+    logger.debug(f"Cost components: {cost_components}")
     
-    # Calculate weighted sum
-    try:
-        total_cost = (
-            weights[0] * cost_components['distance'] +
-            weights[1] * cost_components['angle'] +
-            weights[2] * cost_components['safety'] +
-            weights[3] * cost_components['density']
-        )
-    except Exception as e:
-        logger.error(f"Error calculating total cost: {str(e)}")
-        total_cost = float('inf')
+    # Apply weight to distance cost only
+    if weights is not None and len(weights) > 0:
+        total_cost = weights[0] * cost_components["distance"]
+    else:
+        total_cost = cost_components["distance"]
     
-    logger.debug(f"Cost components: {cost_components}, Total: {total_cost}")
+    logger.debug(f"Total weighted cost: {total_cost}")
+    
     return total_cost, cost_components
+
+def visualize_trajectory(insertion_point, trajectory_direction, pedicle_center, trajectory_length=100.0, name_prefix="Debug"):
+    """
+    Create visualization objects for a trajectory and its relationship to the pedicle center.
+    
+    Parameters:
+        insertion_point (array): 3D coordinates of insertion point
+        trajectory_direction (array): Unit vector of trajectory direction
+        pedicle_center (array): 3D coordinates of pedicle center
+        trajectory_length (float): Length of the trajectory line
+        name_prefix (str): Prefix for node names
+        
+    Returns:
+        tuple: (trajectory_node, distance_line_node, point_node) - MRML nodes for visualization
+    """
+    import slicer
+    import vtk
+    import numpy as np
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Calculate the trajectory end point
+        end_point = insertion_point + trajectory_direction * trajectory_length
+        
+        # Create a line source for the trajectory
+        trajectory_line = vtk.vtkLineSource()
+        trajectory_line.SetPoint1(insertion_point)
+        trajectory_line.SetPoint2(end_point)
+        trajectory_line.Update()
+        
+        # Create a model node for the trajectory
+        trajectory_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", f"{name_prefix}_Trajectory")
+        trajectory_node.SetAndObservePolyData(trajectory_line.GetOutput())
+        
+        # Create a display node for the trajectory
+        trajectory_display = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelDisplayNode")
+        trajectory_display.SetColor(0.0, 1.0, 0.0)  # Green
+        trajectory_display.SetLineWidth(3.0)
+        trajectory_node.SetAndObserveDisplayNodeID(trajectory_display.GetID())
+        
+        # Calculate the closest point on the trajectory to the pedicle center
+        # Project pedicle_center onto the trajectory line
+        vec_to_center = pedicle_center - insertion_point
+        projection = np.dot(vec_to_center, trajectory_direction) * trajectory_direction
+        closest_point = insertion_point + projection
+        
+        # Create a line source for the distance line
+        distance_line = vtk.vtkLineSource()
+        distance_line.SetPoint1(pedicle_center)
+        distance_line.SetPoint2(closest_point)
+        distance_line.Update()
+        
+        # Create a model node for the distance line
+        distance_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", f"{name_prefix}_Distance")
+        distance_node.SetAndObservePolyData(distance_line.GetOutput())
+        
+        # Create a display node for the distance line
+        distance_display = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelDisplayNode")
+        distance_display.SetColor(1.0, 0.0, 0.0)  # Red
+        distance_display.SetLineWidth(2.0)
+        distance_node.SetAndObserveDisplayNodeID(distance_display.GetID())
+        
+        # Create a point for the pedicle center
+        point_source = vtk.vtkSphereSource()
+        point_source.SetCenter(pedicle_center)
+        point_source.SetRadius(2.0)
+        point_source.Update()
+        
+        # Create a model node for the point
+        point_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", f"{name_prefix}_Center")
+        point_node.SetAndObservePolyData(point_source.GetOutput())
+        
+        # Create a display node for the point
+        point_display = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelDisplayNode")
+        point_display.SetColor(1.0, 1.0, 0.0)  # Yellow
+        point_node.SetAndObserveDisplayNodeID(point_display.GetID())
+        
+        # Calculate and log the distance
+        distance = np.linalg.norm(pedicle_center - closest_point)
+        logger.info(f"Distance from trajectory to pedicle center: {distance:.2f} mm")
+        
+        return trajectory_node, distance_node, point_node
+        
+    except Exception as e:
+        logger.error(f"Error in visualize_trajectory: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None, None, None
+
+
+def visualize_search_result(vertebra, insertion_point, final_traj, angles, cost, name_prefix="Optimal"):
+    """
+    Create visualization of the final search result.
+    
+    Parameters:
+        vertebra: Vertebra object containing anatomical information
+        insertion_point: 3D coordinates of insertion point
+        final_traj: Vector representing the optimal trajectory direction
+        angles: Tuple of (vertical_angle, horizontal_angle) in degrees
+        cost: Cost value of the final trajectory
+        name_prefix: Prefix for node names
+        
+    Returns:
+        tuple: (trajectory_node, distance_node, point_node, info_node) - MRML nodes for visualization
+    """
+    import slicer
+    import vtk
+    import numpy as np
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Create basic trajectory visualization
+        trajectory_node, distance_node, point_node = visualize_trajectory(
+            insertion_point, 
+            final_traj, 
+            vertebra.pedicle_center_point if hasattr(vertebra, 'pedicle_center_point') else vertebra.centroid, 
+            trajectory_length=100.0, 
+            name_prefix=name_prefix
+        )
+        
+        # Create a text annotation for the result
+        vertical_angle, horizontal_angle = angles
+        info_text = f"Trajectory Info:\n"
+        info_text += f"Vertical Angle: {vertical_angle:.1f}°\n"
+        info_text += f"Horizontal Angle: {horizontal_angle:.1f}°\n"
+        info_text += f"Cost: {cost:.2f}\n"
+        
+        info_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTextNode", f"{name_prefix}_Info")
+        info_node.SetText(info_text)
+        
+        # Log the result
+        logger.info(f"\n{info_text}")
+        
+        return trajectory_node, distance_node, point_node, info_node
+        
+    except Exception as e:
+        logger.error(f"Error in visualize_search_result: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None, None, None, None
+    
+def test_distance_cost_function():
+    """
+    Test and validate the distance cost function with controlled inputs.
+    Creates a simple test case and visualizes the results.
+    
+    This function can be called from the Python console in Slicer to debug the cost function:
+        from BARTPedicleScrewSimulatorWizard.CostFunctions import test_distance_cost_function
+        test_distance_cost_function()
+    """
+    import slicer
+    import vtk
+    import numpy as np
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.DEBUG)  # Set to DEBUG for detailed output
+    
+    # Create console handler if not already present
+    if not logger.handlers:
+        console = logging.StreamHandler()
+        console.setLevel(logging.DEBUG)
+        formatter = logging.Formatter('%(name)s - %(levelname)s - %(message)s')
+        console.setFormatter(formatter)
+        logger.addHandler(console)
+    
+    logger.info("Running distance cost function test...")
+    
+    # Create test case with known geometry
+    # Define a line that passes 5 units away from the origin
+    insertion_point = np.array([0.0, 0.0, 0.0])
+    trajectory_direction = np.array([0.0, 1.0, 0.0])  # Pointing along y-axis
+    pedicle_center = np.array([5.0, 10.0, 0.0])  # 5 units to the right, 10 units forward
+    
+    # Expected distance: 5.0 (x-component of pedicle_center)
+    expected_distance = 5.0
+    
+    # Calculate distance using our function
+    try:
+        from .CostFunctions import distance_cost, point_to_line_distance
+        
+        # Test distance_cost function
+        distance = distance_cost(insertion_point, trajectory_direction, pedicle_center)
+        logger.info(f"distance_cost result: {distance}")
+        logger.info(f"Expected result: {expected_distance}")
+        logger.info(f"Difference: {abs(distance - expected_distance)}")
+        
+        # Test point_to_line_distance function as well
+        distance2 = point_to_line_distance(pedicle_center, insertion_point, trajectory_direction)
+        logger.info(f"point_to_line_distance result: {distance2}")
+        logger.info(f"Expected result: {expected_distance}")
+        logger.info(f"Difference: {abs(distance2 - expected_distance)}")
+        
+    except Exception as e:
+        logger.error(f"Error during cost function test: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        
+    # Visualize the test case
+    try:
+        # Create a line source for the trajectory
+        line_source = vtk.vtkLineSource()
+        line_source.SetPoint1(insertion_point)
+        end_point = insertion_point + trajectory_direction * 20.0  # 20 units long
+        line_source.SetPoint2(end_point)
+        line_source.Update()
+        
+        # Create model for trajectory
+        trajectory_model = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "TestTrajectory")
+        trajectory_model.SetAndObservePolyData(line_source.GetOutput())
+        
+        # Create display node for trajectory
+        display_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelDisplayNode")
+        display_node.SetColor(0.0, 1.0, 0.0)  # Green
+        display_node.SetLineWidth(2.0)
+        trajectory_model.SetAndObserveDisplayNodeID(display_node.GetID())
+        
+        # Create a sphere source for pedicle center
+        sphere_source = vtk.vtkSphereSource()
+        sphere_source.SetCenter(pedicle_center)
+        sphere_source.SetRadius(1.0)
+        sphere_source.Update()
+        
+        # Create model for pedicle center
+        center_model = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "TestPedicleCenter")
+        center_model.SetAndObservePolyData(sphere_source.GetOutput())
+        
+        # Create display node for pedicle center
+        center_display = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelDisplayNode")
+        center_display.SetColor(1.0, 0.0, 0.0)  # Red
+        center_model.SetAndObserveDisplayNodeID(center_display.GetID())
+        
+        # Calculate closest point on trajectory to pedicle center
+        normalized_direction = trajectory_direction / np.linalg.norm(trajectory_direction)
+        vec_to_center = pedicle_center - insertion_point
+        projection = np.dot(vec_to_center, normalized_direction) * normalized_direction
+        closest_point = insertion_point + projection
+        
+        # Create line from pedicle center to closest point (perpendicular distance)
+        distance_line = vtk.vtkLineSource()
+        distance_line.SetPoint1(pedicle_center)
+        distance_line.SetPoint2(closest_point)
+        distance_line.Update()
+        
+        # Create model for distance line
+        distance_model = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "TestDistanceLine")
+        distance_model.SetAndObservePolyData(distance_line.GetOutput())
+        
+        # Create display node for distance line
+        distance_display = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelDisplayNode")
+        distance_display.SetColor(1.0, 1.0, 0.0)  # Yellow
+        distance_display.SetLineWidth(2.0)
+        distance_model.SetAndObserveDisplayNodeID(distance_display.GetID())
+        
+        # Change to 3D view
+        slicer.app.layoutManager().setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
+        
+        # Create a text annotation with the test results
+        test_info = (
+            f"Distance Cost Function Test\n"
+            f"----------------------------\n"
+            f"Insertion point: {insertion_point}\n"
+            f"Trajectory direction: {trajectory_direction}\n"
+            f"Pedicle center: {pedicle_center}\n"
+            f"Expected distance: {expected_distance}\n"
+            f"Calculated distance: {distance}\n"
+            f"Difference: {abs(distance - expected_distance)}\n"
+        )
+        
+        # Create a text node with the test info
+        text_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTextNode", "TestDistanceCostInfo")
+        text_node.SetText(test_info)
+        
+        # Display the text in the Python console
+        logger.info("\n" + test_info)
+        
+        return {
+            "trajectory_model": trajectory_model,
+            "center_model": center_model,
+            "distance_model": distance_model,
+            "text_node": text_node,
+            "distance": distance,
+            "expected_distance": expected_distance
+        }
+        
+    except Exception as e:
+        logger.error(f"Error during visualization: {str(e)}")
