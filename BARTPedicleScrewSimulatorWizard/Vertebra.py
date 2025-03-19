@@ -130,7 +130,7 @@ class Vertebra:
                 canal_min_y, 
                 target_level,
                 buffer_front=15,
-                buffer_end=1
+                buffer_end=12
             )
             
             # Create debug volume for pedicle
@@ -719,7 +719,7 @@ class Vertebra:
             canal_max_y = self.mask_array.shape[1] // 2
             return canal_min_y, canal_max_y
     
-    def _cut_pedicle(self, volume_array, y_max, y_min, buffer_front=15, buffer_end=1):
+    def _cut_pedicle(self, volume_array, y_max, y_min, buffer_front=0, buffer_end=0):
         """
         Cut out the pedicle region from the volume.
         
@@ -1265,7 +1265,7 @@ class Vertebra:
             self.logger.error(traceback.format_exc())
             return np.zeros((0, 3))
         
-    def _cut_pedicle_with_label(self, volume_array, mask_array, y_max, y_min, target_level, buffer_front=15, buffer_end=1):
+    def _cut_pedicle_with_label(self, volume_array, mask_array, y_max, y_min, target_level, buffer_front=0, buffer_end=0):
         """
         Cut out the pedicle region from the volume, using segmentation label information
         to isolate the specific vertebra of interest. Uses PCA-based alignment and 
