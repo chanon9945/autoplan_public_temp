@@ -111,7 +111,7 @@ class Vertebra:
                 self.maskedVolume.SetName("MaskedVertebraVolume")
             
             # Calculate centroid of the vertebra
-            self.centroid = self._calculate_centroid(self.mask_array)
+            self.centroid = self._calculate_centroid_with_label(self.mask_array)
             self.logger.info(f"Vertebra centroid (RAS): {self.centroid}")
             
             # Convert centroid to IJK for debugging
@@ -522,10 +522,14 @@ class Vertebra:
             self.logger.error(f"Error in _calculate_centroid: {str(e)}")
             return self.insertion_point
             
-    def _detect_spinal_canal_improved(self):
+    def _detect_spinal_canal_improved(self, target_level=None):
         """
         Detect the anterior and posterior boundaries of the spinal canal
         using floodfill-inspired approach similar to the MATLAB implementation.
+        Now supports level-specific detection.
+        
+        Parameters:
+            target_level: Target vertebra level (e.g., 'L4', 'L5')
         
         Returns:
             tuple: (canal_min_y, canal_max_y) in image coordinates
@@ -538,51 +542,109 @@ class Vertebra:
                 self.logger.warning("No centroid available for spinal canal detection")
                 return canal_min_y, canal_max_y
             
+            # Create a mask that isolates only the target vertebra level
+            level_mask = None
+            if target_level:
+                level_label = None
+                
+                # If we have a segmentation labelmap with proper labels
+                if hasattr(self, 'mask_node') and hasattr(self.mask_node, 'GetLabelName'):
+                    # Try to find the label corresponding to the target level
+                    num_labels = self.mask_node.GetNumberOfLabels()
+                    for i in range(num_labels):
+                        label_name = self.mask_node.GetLabelName(i)
+                        if label_name and target_level in label_name:
+                            level_label = i
+                            self.logger.info(f"Found label {level_label} for {target_level}: {label_name}")
+                            break
+                
+                # If we don't have label information, check if the mask has discrete values
+                if level_label is None:
+                    # Map lumbar levels to typical label values if needed
+                    level_mapping = {
+                        'L1': 5,
+                        'L2': 4,
+                        'L3': 3,
+                        'L4': 2,
+                        'L5': 1
+                    }
+                    
+                    # Get unique values in the mask (excluding 0)
+                    unique_values = np.unique(self.mask_array)
+                    unique_values = unique_values[unique_values > 0]
+                    
+                    # Try to find the label based on the mapping
+                    if target_level in level_mapping and level_mapping[target_level] in unique_values:
+                        level_label = level_mapping[target_level]
+                        self.logger.info(f"Using mapped label {level_label} for {target_level}")
+                    elif len(unique_values) == 1:
+                        # If there's only one segmentation, use it
+                        level_label = unique_values[0]
+                        self.logger.info(f"Using only available label {level_label}")
+                    else:
+                        # Can't determine which label to use
+                        self.logger.warning(f"Cannot determine label for {target_level}, using all segmentations")
+                
+                # Create level-specific mask
+                if level_label is not None:
+                    level_mask = (self.mask_array == level_label)
+                    self.logger.info(f"Created mask for label {level_label} with {np.count_nonzero(level_mask)} voxels")
+                    
+                    # If the mask is empty, fall back to using all segmentations
+                    if np.count_nonzero(level_mask) == 0:
+                        self.logger.warning(f"Empty mask for label {level_label}, using all segmentations")
+                        level_mask = None
+            
+            # Use level-specific mask if available, otherwise use the full mask
+            binary_mask = level_mask if level_mask is not None else (self.mask_array > 0)
+            
             # Convert centroid to IJK coordinates
             centroid_ijk = self._ras_to_ijk(self.centroid)
             
             # Get mid-axial slice at centroid Z
             sliceZ = int(np.round(centroid_ijk[2]))
-            sliceZ = max(0, min(sliceZ, self.mask_array.shape[2] - 1))
+            sliceZ = max(0, min(sliceZ, binary_mask.shape[2] - 1))
             
             # Extract slice
-            slice_mask = self.mask_array[:, :, sliceZ].copy()
-            
-            # Create a binary mask for the vertebra
-            binary_mask = (slice_mask > 0).astype(np.uint8)
+            slice_mask = binary_mask[:, :, sliceZ].copy()
             
             # Create a debug volume for visualization
             if hasattr(slicer, 'mrmlScene'):
                 # Save binary mask for debugging
                 debug_node = self._numpy_to_volume(
-                    binary_mask[:, :, np.newaxis],  # Convert 2D slice to 3D volume
+                    slice_mask[:, :, np.newaxis],  # Convert 2D slice to 3D volume
                     self.volume_node
                 )
                 if debug_node:
                     debug_node.SetName("DebugVertebraSlice")
             
             # Find the center point of the vertebra in this slice
-            x_idx = int(np.round(centroid_ijk[0]))
-            x_idx = max(0, min(x_idx, binary_mask.shape[0] - 1))
-            
-            # Find a seed point for the spinal canal
-            # Start from centroid and move posteriorly until reaching edge
-            y_idx = int(np.round(centroid_ijk[1]))
-            y_idx = max(0, min(y_idx, binary_mask.shape[1] - 1))
+            # Calculate centroid of the vertebra in this slice
+            if np.count_nonzero(slice_mask) > 0:
+                # Find the centroid specifically of this slice
+                x_indices, y_indices = np.where(slice_mask > 0)
+                x_idx = int(np.mean(x_indices))
+                y_idx = int(np.mean(y_indices))
+            else:
+                # Fall back to the projected centroid
+                x_idx = int(np.round(centroid_ijk[0]))
+                x_idx = max(0, min(x_idx, slice_mask.shape[0] - 1))
+                y_idx = int(np.round(centroid_ijk[1]))
+                y_idx = max(0, min(y_idx, slice_mask.shape[1] - 1))
             
             # Store the initial indices for debugging
             initial_x, initial_y = x_idx, y_idx
             
             # 1. Move backward until we exit the vertebra
             posterior_edge = y_idx
-            while posterior_edge > 0 and binary_mask[x_idx, posterior_edge] > 0:
+            while posterior_edge > 0 and slice_mask[x_idx, posterior_edge] > 0:
                 posterior_edge -= 1
                 
             self.logger.info(f"Found posterior edge at y={posterior_edge}")
             
             # 2. Move forward from posterior edge until we enter the vertebra again
             anterior_edge = posterior_edge
-            while anterior_edge < binary_mask.shape[1] - 1 and binary_mask[x_idx, anterior_edge] == 0:
+            while anterior_edge < slice_mask.shape[1] - 1 and slice_mask[x_idx, anterior_edge] == 0:
                 anterior_edge += 1
                 
             self.logger.info(f"Found anterior edge at y={anterior_edge}")
@@ -591,18 +653,17 @@ class Vertebra:
             if anterior_edge > posterior_edge:
                 # Use the floodfill approach to identify the canal more accurately
                 try:
-                    from scipy.ndimage import binary_fill_holes, label
+                    from scipy.ndimage import label
                     
                     # Seed point in the middle of the suspected canal
                     seed_y = (posterior_edge + anterior_edge) // 2
                     
                     # Create a marker for the seed
-                    seed_mask = np.zeros_like(binary_mask)
+                    seed_mask = np.zeros_like(slice_mask)
                     seed_mask[x_idx, seed_y] = 1
                     
-                    # Floodfill using binary hole filling
                     # Create inverse mask (0=vertebra, 1=background and canal)
-                    inv_mask = 1 - binary_mask
+                    inv_mask = 1 - slice_mask
                     
                     # Label connected regions
                     labeled_regions, num_regions = label(inv_mask)
@@ -629,11 +690,11 @@ class Vertebra:
                             if debug_canal:
                                 debug_canal.SetName("DebugCanalMask")
                         
-                        self.logger.info(f"Found canal boundaries using floodfill: min_y={canal_min_y}, max_y={canal_max_y}")
+                        self.logger.info(f"Found canal boundaries using floodfill: min_y={canal_min_y}, max_y={canal_max_y} for level {target_level}")
                         
                         # Add margin to make sure we fully capture the canal
                         canal_min_y = max(0, canal_min_y - 5)
-                        canal_max_y = min(binary_mask.shape[1] - 1, canal_max_y + 5)
+                        canal_max_y = min(slice_mask.shape[1] - 1, canal_max_y + 5)
                         
                         return canal_min_y, canal_max_y
                 except Exception as e:
@@ -643,9 +704,9 @@ class Vertebra:
             # Fallback approach based on edge detection
             # Add margin to make sure we fully capture the canal
             canal_min_y = max(0, posterior_edge - 5)
-            canal_max_y = min(binary_mask.shape[1] - 1, anterior_edge + 5)
+            canal_max_y = min(slice_mask.shape[1] - 1, anterior_edge + 5)
             
-            self.logger.info(f"Found canal boundaries using edge detection: min_y={canal_min_y}, max_y={canal_max_y}")
+            self.logger.info(f"Found canal boundaries using edge detection: min_y={canal_min_y}, max_y={canal_max_y} for level {target_level}")
             
             return canal_min_y, canal_max_y
             
@@ -1204,16 +1265,17 @@ class Vertebra:
             self.logger.error(traceback.format_exc())
             return np.zeros((0, 3))
         
-    def _cut_pedicle_with_label(self, volume_array, mask_array, y_max, y_min, target_level, buffer_front=5, buffer_end=1):
+    def _cut_pedicle_with_label(self, volume_array, mask_array, y_max, y_min, target_level, buffer_front=15, buffer_end=1):
         """
         Cut out the pedicle region from the volume, using segmentation label information
-        to isolate the specific vertebra of interest.
+        to isolate the specific vertebra of interest. Uses PCA-based alignment and 
+        Z-direction seed point selection for better handling of tilted vertebrae.
         
         Parameters:
             volume_array: 3D numpy array of the volume
             mask_array: 3D numpy array of the segmentation mask
-            y_max: Maximum Y coordinate of spinal canal
-            y_min: Minimum Y coordinate of spinal canal
+            y_max: Maximum Y coordinate of spinal canal (will be recalculated for specific level)
+            y_min: Minimum Y coordinate of spinal canal (will be recalculated for specific level)
             target_level: Target level string (e.g., 'L4')
             buffer_front: Buffer before spinal canal
             buffer_end: Buffer after spinal canal
@@ -1222,12 +1284,17 @@ class Vertebra:
             numpy.ndarray: Cropped array containing only the pedicle region at the specified level
         """
         try:
+            import time
+            from scipy.spatial.transform import Rotation as R
+            from sklearn.decomposition import PCA
+            
+            start_time = time.time()
+            
             # Create a copy to avoid modifying the original
             result = volume_array.copy()
             
             # Log the input parameters for debugging
-            self.logger.info(f"Cutting pedicle at {target_level} with y_min={y_min}, y_max={y_max}")
-            self.logger.info(f"Volume array shape: {result.shape}")
+            self.logger.info(f"Cutting pedicle at {target_level} with original y_min={y_min}, y_max={y_max}")
             
             # Extract the vertebra label for the target level
             level_label = None
@@ -1238,13 +1305,13 @@ class Vertebra:
                 num_labels = self.mask_node.GetNumberOfLabels()
                 for i in range(num_labels):
                     label_name = self.mask_node.GetLabelName(i)
-                    if label_name and target_level in label_name:
+                    if label_name and target_level and target_level in label_name:
                         level_label = i
                         self.logger.info(f"Found label {level_label} for {target_level}: {label_name}")
                         break
             
             # If we don't have label information, check if the mask has discrete values
-            if level_label is None:
+            if level_label is None and target_level:
                 # Get unique values in the mask (excluding 0)
                 unique_values = np.unique(mask_array)
                 unique_values = unique_values[unique_values > 0]
@@ -1285,31 +1352,207 @@ class Vertebra:
                 vertebra_mask = (mask_array > 0)
             
             # Apply the vertebra mask to isolate the target vertebra
-            result = result * vertebra_mask
+            masked_volume = result * vertebra_mask
             
-            # Calculate boundaries
-            y_min_idx = max(0, min(int(y_min + buffer_front + 1), result.shape[1] - 1))
-            y_max_idx = max(0, min(int(y_max - buffer_end), result.shape[1] - 1))
+            # Step 1: Perform PCA to find principal axes of the vertebra
+            pca_start_time = time.time()
             
-            self.logger.info(f"Cutting pedicle at indices: y_min_idx={y_min_idx}, y_max_idx={y_max_idx}")
-            
-            # Zero out regions outside pedicle (anterior portion)
-            if y_min_idx > 0:
-                result[:, 0:y_min_idx, :] = 0
+            # Get coordinates of all non-zero voxels in the vertebra mask
+            nonzero_coords = np.where(vertebra_mask)
+            if len(nonzero_coords[0]) < 10:  # Need enough points for meaningful PCA
+                self.logger.warning(f"Not enough voxels ({len(nonzero_coords[0])}) for PCA")
+                # Fall back to original canal detection
+                level_y_min, level_y_max = self._detect_spinal_canal_improved(target_level)
                 
-            # Zero out regions outside pedicle (posterior portion)
-            if y_max_idx < result.shape[1] - 1:
-                result[:, y_max_idx:, :] = 0
+                # Apply original cutting method
+                y_min_idx = max(0, min(int(level_y_min + buffer_front + 1), masked_volume.shape[1] - 1))
+                y_max_idx = max(0, min(int(level_y_max - buffer_end), masked_volume.shape[1] - 1))
+                
+                pedicle_result = masked_volume.copy()
+                pedicle_result[:, 0:y_min_idx, :] = 0
+                pedicle_result[:, y_max_idx:, :] = 0
+                
+                self.logger.info(f"Fallback pedicle cutting took {time.time() - start_time:.2f} seconds")
+                return pedicle_result
+            
+            # Convert to (n_points, n_dims) array for PCA
+            points = np.vstack([nonzero_coords[0], nonzero_coords[1], nonzero_coords[2]]).T
+            
+            # Perform PCA
+            pca = PCA(n_components=3)
+            pca.fit(points)
+            
+            # Get principal components
+            principal_axes = pca.components_
+            
+            # The first principal component should be along the main axis of the vertebra
+            main_axis = principal_axes[0]
+            
+            # Create a rotation matrix to align the main axis with the Y axis (anterior-posterior)
+            target_axis = np.array([0, 1, 0])  # Align with Y axis
+            
+            # Calculate the center of mass of the vertebra
+            center_of_mass = np.mean(points, axis=0)
+            
+            # Create rotation that aligns main_axis with the target_axis
+            rotation = R.align_vectors([target_axis], [main_axis])[0]
+            rotation_matrix = rotation.as_matrix()
+            
+            self.logger.info(f"PCA took {time.time() - pca_start_time:.2f} seconds")
+            self.logger.info(f"Principal axes: {principal_axes}")
+            self.logger.info(f"Center of mass: {center_of_mass}")
+            
+            # Step 2: Transform the vertebra to aligned space
+            transform_start_time = time.time()
+            
+            # Create aligned volume with same shape as original
+            aligned_volume = np.zeros_like(masked_volume)
+            aligned_mask = np.zeros_like(vertebra_mask)
+            
+            # For each voxel in the original vertebra
+            original_indices = np.where(vertebra_mask)
+            original_points = np.vstack([original_indices[0], original_indices[1], original_indices[2]]).T
+            
+            # Center the points
+            centered_points = original_points - center_of_mass
+            
+            # Apply rotation to get aligned points
+            aligned_points = (rotation.apply(centered_points) + center_of_mass)
+            
+            # Round to get voxel indices
+            aligned_indices = np.round(aligned_points).astype(int)
+            
+            # Filter to points within bounds
+            valid_mask = (
+                (aligned_indices[:, 0] >= 0) & 
+                (aligned_indices[:, 0] < masked_volume.shape[0]) &
+                (aligned_indices[:, 1] >= 0) & 
+                (aligned_indices[:, 1] < masked_volume.shape[1]) &
+                (aligned_indices[:, 2] >= 0) & 
+                (aligned_indices[:, 2] < masked_volume.shape[2])
+            )
+            
+            valid_aligned_indices = aligned_indices[valid_mask]
+            valid_original_indices = original_points[valid_mask].astype(int)
+            
+            # Map values from original to aligned space
+            for i in range(len(valid_aligned_indices)):
+                aligned_idx = tuple(valid_aligned_indices[i])
+                orig_idx = tuple(valid_original_indices[i])
+                aligned_volume[aligned_idx] = masked_volume[orig_idx]
+                aligned_mask[aligned_idx] = 1
+            
+            # Create debug volumes for visualization
+            if hasattr(slicer, 'mrmlScene'):
+                debug_aligned = self._numpy_to_volume(
+                    aligned_volume,
+                    self.volume_node
+                )
+                if debug_aligned:
+                    debug_aligned.SetName(f"DebugAlignedVertebra_{target_level}")
+            
+            self.logger.info(f"Transformation took {time.time() - transform_start_time:.2f} seconds")
+            
+            # Step 3: Detect spinal canal in aligned space using the improved Z-direction method
+            canal_detection_start = time.time()
+            
+            # Use the dedicated function for Z-direction seed point selection
+            aligned_y_min, aligned_y_max = self._find_spinal_canal_in_aligned_space(aligned_mask)
+            
+            self.logger.info(f"Aligned space canal boundaries: min_y={aligned_y_min}, max_y={aligned_y_max}")
+            self.logger.info(f"Canal detection took {time.time() - canal_detection_start:.2f} seconds")
+            
+            # Step 4: Cut pedicle in aligned space
+            cutting_start = time.time()
+            
+            # Apply the buffer in aligned space
+            aligned_y_min_idx = max(0, min(int(aligned_y_min + buffer_front + 1), aligned_volume.shape[1] - 1))
+            aligned_y_max_idx = max(0, min(int(aligned_y_max - buffer_end), aligned_volume.shape[1] - 1))
+            
+            # Create a copy to work on
+            aligned_pedicle = aligned_volume.copy()
+            
+            # Zero out regions outside pedicle (anterior and posterior)
+            aligned_pedicle[:, 0:aligned_y_min_idx, :] = 0
+            aligned_pedicle[:, aligned_y_max_idx:, :] = 0
+            
+            # Create debug pedicle visualization in aligned space
+            if hasattr(slicer, 'mrmlScene'):
+                debug_aligned_pedicle = self._numpy_to_volume(
+                    aligned_pedicle,
+                    self.volume_node
+                )
+                if debug_aligned_pedicle:
+                    debug_aligned_pedicle.SetName(f"DebugAlignedPedicle_{target_level}")
+            
+            self.logger.info(f"Cutting took {time.time() - cutting_start:.2f} seconds")
+            
+            # Step 5: Transform pedicle back to original space
+            transform_back_start = time.time()
+            
+            # Create output array in original space
+            pedicle_result = np.zeros_like(masked_volume)
+            
+            # Get indices of the pedicle in aligned space
+            aligned_pedicle_indices = np.where(aligned_pedicle > 0)
+            if len(aligned_pedicle_indices[0]) > 0:
+                aligned_pedicle_points = np.vstack([
+                    aligned_pedicle_indices[0], 
+                    aligned_pedicle_indices[1], 
+                    aligned_pedicle_indices[2]
+                ]).T
+                
+                # Center the points
+                centered_pedicle_points = aligned_pedicle_points - center_of_mass
+                
+                # Apply inverse rotation
+                inverse_rotation = rotation.inv()
+                original_pedicle_points = (inverse_rotation.apply(centered_pedicle_points) + center_of_mass)
+                
+                # Round to get voxel indices
+                original_pedicle_indices = np.round(original_pedicle_points).astype(int)
+                
+                # Filter valid indices
+                valid_mask = (
+                    (original_pedicle_indices[:, 0] >= 0) & 
+                    (original_pedicle_indices[:, 0] < pedicle_result.shape[0]) &
+                    (original_pedicle_indices[:, 1] >= 0) & 
+                    (original_pedicle_indices[:, 1] < pedicle_result.shape[1]) &
+                    (original_pedicle_indices[:, 2] >= 0) & 
+                    (original_pedicle_indices[:, 2] < pedicle_result.shape[2])
+                )
+                
+                valid_original_indices = original_pedicle_indices[valid_mask]
+                valid_aligned_indices = aligned_pedicle_points[valid_mask].astype(int)
+                
+                # Map values from aligned space back to original space
+                for i in range(len(valid_original_indices)):
+                    orig_idx = tuple(valid_original_indices[i])
+                    aligned_idx = tuple(valid_aligned_indices[i])
+                    pedicle_result[orig_idx] = aligned_pedicle[aligned_idx]
+                
+                self.logger.info(f"Transform back took {time.time() - transform_back_start:.2f} seconds")
+            else:
+                self.logger.warning("No pedicle voxels found in aligned space")
+                # Fall back to using original (unaligned) approach
+                level_y_min, level_y_max = self._detect_spinal_canal_improved(target_level)
+                
+                # Apply original cutting method
+                y_min_idx = max(0, min(int(level_y_min + buffer_front + 1), masked_volume.shape[1] - 1))
+                y_max_idx = max(0, min(int(level_y_max - buffer_end), masked_volume.shape[1] - 1))
+                
+                pedicle_result = masked_volume.copy()
+                pedicle_result[:, 0:y_min_idx, :] = 0
+                pedicle_result[:, y_max_idx:, :] = 0
             
             # Check if we have a valid result
-            non_zero_count = np.count_nonzero(result)
+            non_zero_count = np.count_nonzero(pedicle_result)
             self.logger.info(f"Pedicle non-zero voxel count: {non_zero_count}")
             
             if non_zero_count == 0:
                 self.logger.warning("Pedicle cutting resulted in empty array, using fallback approach")
                 
-                # Fall back to a more general approach
-                # First, get the centroid of this specific vertebra
+                # Fall back to a simple box around the vertebra centroid
                 vertebra_indices = np.where(vertebra_mask)
                 if len(vertebra_indices[0]) > 0:
                     v_centroid_ijk = np.array([
@@ -1328,19 +1571,20 @@ class Vertebra:
                     z_max = min(volume_array.shape[2], v_centroid_ijk[2] + radius)
                     
                     # Zero out everything except the small box
-                    result = volume_array.copy() * vertebra_mask
-                    result[:x_min, :, :] = 0
-                    result[x_max:, :, :] = 0
-                    result[:, :y_min, :] = 0
-                    result[:, y_max:, :] = 0
-                    result[:, :, :z_min] = 0
-                    result[:, :, z_max:] = 0
+                    pedicle_result = volume_array.copy() * vertebra_mask
+                    pedicle_result[:x_min, :, :] = 0
+                    pedicle_result[x_max:, :, :] = 0
+                    pedicle_result[:, :y_min, :] = 0
+                    pedicle_result[:, y_max:, :] = 0
+                    pedicle_result[:, :, :z_min] = 0
+                    pedicle_result[:, :, z_max:] = 0
                 else:
                     self.logger.warning("Empty vertebra mask, using original volume")
                     # If still empty, return the original volume
-                    result = volume_array.copy()
+                    pedicle_result = volume_array.copy()
             
-            return result
+            self.logger.info(f"Pedicle cutting with alignment took {time.time() - start_time:.2f} seconds")
+            return pedicle_result
             
         except Exception as e:
             self.logger.error(f"Error in _cut_pedicle_with_label: {str(e)}")
@@ -1449,6 +1693,680 @@ class Vertebra:
                 "L4": 2,
                 "L5": 1
             }
+    def _detect_spinal_canal_with_pca_alignment(self, target_level=None):
+        """
+        Detect the anterior and posterior boundaries of the spinal canal
+        using PCA-based alignment of the vertebra to handle tilted vertebrae.
+        
+        Parameters:
+            target_level: Target vertebra level (e.g., 'L4', 'L5')
+        
+        Returns:
+            tuple: (canal_min_y, canal_max_y) in image coordinates
+        """
+        try:
+            import time
+            start_time = time.time()
+            self.logger.info(f"Starting PCA-based spinal canal detection for level {target_level}")
+            
+            # If no centroid, return default values
+            if not hasattr(self, 'centroid') or self.centroid is None:
+                canal_min_y = 0
+                canal_max_y = self.mask_array.shape[1] // 2
+                self.logger.warning("No centroid available for spinal canal detection")
+                return canal_min_y, canal_max_y
+            
+            # Create a mask that isolates only the target vertebra level
+            level_mask = None
+            if target_level:
+                level_label = None
+                
+                # If we have a segmentation labelmap with proper labels
+                if hasattr(self, 'mask_node') and hasattr(self.mask_node, 'GetLabelName'):
+                    # Try to find the label corresponding to the target level
+                    num_labels = self.mask_node.GetNumberOfLabels()
+                    for i in range(num_labels):
+                        label_name = self.mask_node.GetLabelName(i)
+                        if label_name and target_level in label_name:
+                            level_label = i
+                            self.logger.info(f"Found label {level_label} for {target_level}: {label_name}")
+                            break
+                
+                # If we don't have label information, check if the mask has discrete values
+                if level_label is None:
+                    # Map lumbar levels to typical label values if needed
+                    level_mapping = {
+                        'L1': 5,
+                        'L2': 4,
+                        'L3': 3,
+                        'L4': 2,
+                        'L5': 1
+                    }
+                    
+                    # Get unique values in the mask (excluding 0)
+                    unique_values = np.unique(self.mask_array)
+                    unique_values = unique_values[unique_values > 0]
+                    
+                    # Try to find the label based on the mapping
+                    if target_level in level_mapping and level_mapping[target_level] in unique_values:
+                        level_label = level_mapping[target_level]
+                        self.logger.info(f"Using mapped label {level_label} for {target_level}")
+                    elif len(unique_values) == 1:
+                        # If there's only one segmentation, use it
+                        level_label = unique_values[0]
+                        self.logger.info(f"Using only available label {level_label}")
+                    else:
+                        # Can't determine which label to use
+                        self.logger.warning(f"Cannot determine label for {target_level}, using all segmentations")
+                
+                # Create level-specific mask
+                if level_label is not None:
+                    level_mask = (self.mask_array == level_label)
+                    self.logger.info(f"Created mask for label {level_label} with {np.count_nonzero(level_mask)} voxels")
+                    
+                    # If the mask is empty, fall back to using all segmentations
+                    if np.count_nonzero(level_mask) == 0:
+                        self.logger.warning(f"Empty mask for label {level_label}, using all segmentations")
+                        level_mask = None
+            
+            # Use level-specific mask if available, otherwise use the full mask
+            binary_mask = level_mask if level_mask is not None else (self.mask_array > 0)
+            
+            # Report the time taken for mask creation
+            self.logger.info(f"Mask creation took {time.time() - start_time:.2f} seconds")
+            
+            # Now let's perform PCA on the vertebra voxels to find principal axes
+            pca_start_time = time.time()
+            
+            # Get coordinates of all non-zero voxels in the binary mask
+            nonzero_coords = np.where(binary_mask)
+            if len(nonzero_coords[0]) < 10:  # Need enough points for meaningful PCA
+                self.logger.warning(f"Not enough voxels ({len(nonzero_coords[0])}) for PCA")
+                # Fall back to original method
+                return self._detect_spinal_canal_improved(target_level)
+            
+            # Convert to (n_points, n_dims) array for PCA
+            points = np.vstack([nonzero_coords[0], nonzero_coords[1], nonzero_coords[2]]).T
+            
+            # Perform PCA
+            from sklearn.decomposition import PCA
+            pca = PCA(n_components=3)
+            pca.fit(points)
+            
+            # Get principal components
+            principal_axes = pca.components_
+            
+            # The first principal component should be along the main axis of the vertebra
+            main_axis = principal_axes[0]
+            
+            # Create a rotation matrix to align the main axis with the Y axis (anterior-posterior)
+            from scipy.spatial.transform import Rotation as R
+            
+            # Determine if the main axis is more aligned with X, Y, or Z
+            abs_main_axis = np.abs(main_axis)
+            dominant_axis_idx = np.argmax(abs_main_axis)
+            
+            # We want to align with the Y axis (anterior-posterior)
+            target_axis = np.array([0, 1, 0])
+            
+            # Create rotation that aligns main_axis with the target_axis
+            rotation_matrix = R.align_vectors([target_axis], [main_axis])[0].as_matrix()
+            
+            # Report the time taken for PCA
+            self.logger.info(f"PCA took {time.time() - pca_start_time:.2f} seconds")
+            
+            # Now we need to apply this rotation to our binary mask
+            transform_start_time = time.time()
+            
+            # Calculate the center of mass of the vertebra (for centering the transform)
+            center_of_mass = np.mean(points, axis=0)
+            
+            # Get the original image dimensions
+            original_shape = binary_mask.shape
+            
+            # Create a coordinate grid in the original space
+            x, y, z = np.meshgrid(
+                np.arange(original_shape[0]),
+                np.arange(original_shape[1]),
+                np.arange(original_shape[2]),
+                indexing='ij'
+            )
+            
+            # Flatten the coordinate grid
+            coords = np.vstack([x.flatten(), y.flatten(), z.flatten()]).T
+            
+            # Center coordinates
+            centered_coords = coords - center_of_mass
+            
+            # Apply rotation to get new coordinates
+            rotated_coords = np.dot(centered_coords, rotation_matrix.T) + center_of_mass
+            
+            # Round to nearest integer and convert to indices
+            indices = np.round(rotated_coords).astype(int)
+            
+            # Filter out indices that are outside the original image bounds
+            valid_indices = (
+                (indices[:, 0] >= 0) & (indices[:, 0] < original_shape[0]) &
+                (indices[:, 1] >= 0) & (indices[:, 1] < original_shape[1]) &
+                (indices[:, 2] >= 0) & (indices[:, 2] < original_shape[2])
+            )
+            
+            # Create the aligned binary mask
+            aligned_mask = np.zeros_like(binary_mask)
+            
+            # Map values from original mask to aligned mask
+            for i in range(len(indices)):
+                if valid_indices[i]:
+                    # Get the original coordinate
+                    orig_x, orig_y, orig_z = coords[i].astype(int)
+                    
+                    # Get the rotated coordinate
+                    rot_x, rot_y, rot_z = indices[i]
+                    
+                    # Copy value from original to rotated position
+                    if binary_mask[orig_x, orig_y, orig_z]:
+                        aligned_mask[rot_x, rot_y, rot_z] = 1
+            
+            # Report the time taken for transformation
+            self.logger.info(f"Transformation took {time.time() - transform_start_time:.2f} seconds")
+            
+            # Now we can detect the spinal canal in the aligned mask
+            canal_start_time = time.time()
+            
+            # Create a debug volume for visualization
+            if hasattr(slicer, 'mrmlScene'):
+                debug_aligned = self._numpy_to_volume(
+                    aligned_mask,
+                    self.volume_node
+                )
+                if debug_aligned:
+                    debug_aligned.SetName("DebugAlignedVertebraMask")
+            
+            # Calculate the center of mass in the aligned space
+            aligned_points = np.where(aligned_mask)
+            aligned_center = np.mean(np.vstack([aligned_points[0], aligned_points[1], aligned_points[2]]).T, axis=0)
+            
+            # Get a mid-axial slice at the center of mass Z
+            sliceZ = int(np.round(aligned_center[2]))
+            sliceZ = max(0, min(sliceZ, aligned_mask.shape[2] - 1))
+            
+            # Extract slice
+            slice_mask = aligned_mask[:, :, sliceZ].copy()
+            
+            # Find the center point of the vertebra in this slice
+            if np.count_nonzero(slice_mask) > 0:
+                # Find the centroid of this slice
+                x_indices, y_indices = np.where(slice_mask > 0)
+                x_idx = int(np.mean(x_indices))
+                y_idx = int(np.mean(y_indices))
+            else:
+                # Fall back to the center of the image
+                x_idx = slice_mask.shape[0] // 2
+                y_idx = slice_mask.shape[1] // 2
+                self.logger.warning("No voxels in slice for centroid calculation, using center of image")
+            
+            # Store the initial indices for debugging
+            initial_x, initial_y = x_idx, y_idx
+            
+            # 1. Move backward until we exit the vertebra
+            posterior_edge = y_idx
+            while posterior_edge > 0 and slice_mask[x_idx, posterior_edge] > 0:
+                posterior_edge -= 1
+                
+            self.logger.info(f"Found posterior edge at y={posterior_edge}")
+            
+            # 2. Move forward from posterior edge until we enter the vertebra again
+            anterior_edge = posterior_edge
+            while anterior_edge < slice_mask.shape[1] - 1 and slice_mask[x_idx, anterior_edge] == 0:
+                anterior_edge += 1
+                
+            self.logger.info(f"Found anterior edge at y={anterior_edge}")
+            
+            # If we found a valid canal (gap between vertebra segments)
+            if anterior_edge > posterior_edge:
+                # Use the floodfill approach to identify the canal more accurately
+                try:
+                    from scipy.ndimage import label
+                    
+                    # Seed point in the middle of the suspected canal
+                    seed_y = (posterior_edge + anterior_edge) // 2
+                    
+                    # Create a marker for the seed
+                    seed_mask = np.zeros_like(slice_mask)
+                    seed_mask[x_idx, seed_y] = 1
+                    
+                    # Create inverse mask (0=vertebra, 1=background and canal)
+                    inv_mask = 1 - slice_mask
+                    
+                    # Label connected regions
+                    labeled_regions, num_regions = label(inv_mask)
+                    
+                    # Find the region containing our seed
+                    canal_region = labeled_regions[x_idx, seed_y]
+                    
+                    # Create canal mask
+                    canal_mask = (labeled_regions == canal_region)
+                    
+                    # Find Y boundaries of the canal
+                    canal_y_indices = np.where(canal_mask.sum(axis=0) > 0)[0]
+                    
+                    if len(canal_y_indices) > 0:
+                        aligned_canal_min_y = np.min(canal_y_indices)
+                        aligned_canal_max_y = np.max(canal_y_indices)
+                        
+                        # Create a debug volume for the canal mask
+                        if hasattr(slicer, 'mrmlScene'):
+                            canal_3d = np.zeros_like(aligned_mask)
+                            canal_3d[:, :, sliceZ] = canal_mask
+                            debug_canal = self._numpy_to_volume(
+                                canal_3d,
+                                self.volume_node
+                            )
+                            if debug_canal:
+                                debug_canal.SetName("DebugCanalMask")
+                        
+                        self.logger.info(f"Found canal boundaries in aligned space: min_y={aligned_canal_min_y}, max_y={aligned_canal_max_y}")
+                        
+                        # Now we need to transform these boundaries back to the original space
+                        # This is more complex since we need to map 2D slice coordinates
+                        
+                        # Use the inverse transformation to map points back
+                        inverse_rotation = rotation_matrix.T  # Transpose = inverse for rotation matrices
+                        
+                        # Create a mask in the aligned space that only contains the canal
+                        canal_line_mask = np.zeros_like(slice_mask)
+                        canal_line_mask[x_idx, aligned_canal_min_y:aligned_canal_max_y + 1] = 1
+                        
+                        # Transform this mask back to the original space
+                        # For simplicity, we'll use the same transformation approach but with inverse rotation
+                        
+                        # Get coordinates of non-zero voxels in the canal line mask
+                        canal_coords = np.where(canal_line_mask)
+                        
+                        # Combine with Z coordinate to get 3D points
+                        canal_points = np.vstack([canal_coords[0], canal_coords[1], np.full_like(canal_coords[0], sliceZ)]).T
+                        
+                        # Center coordinates
+                        centered_canal_points = canal_points - center_of_mass
+                        
+                        # Apply inverse rotation
+                        original_canal_points = np.dot(centered_canal_points, inverse_rotation.T) + center_of_mass
+                        
+                        # Project back to original Y coordinates
+                        original_y_coords = original_canal_points[:, 1]
+                        
+                        # Find the range in the original space
+                        if len(original_y_coords) > 0:
+                            canal_min_y = int(np.min(original_y_coords))
+                            canal_max_y = int(np.max(original_y_coords))
+                            
+                            # Add margin to make sure we fully capture the canal
+                            canal_min_y = max(0, canal_min_y - 5)
+                            canal_max_y = min(binary_mask.shape[1] - 1, canal_max_y + 5)
+                            
+                            self.logger.info(f"Transformed canal boundaries to original space: min_y={canal_min_y}, max_y={canal_max_y}")
+                            
+                            # Report the time taken for canal detection
+                            self.logger.info(f"Canal detection took {time.time() - canal_start_time:.2f} seconds")
+                            
+                            return canal_min_y, canal_max_y
+                        else:
+                            self.logger.warning("No canal points found after inverse transformation")
+                except Exception as e:
+                    self.logger.warning(f"Floodfill method failed: {str(e)}")
+                    import traceback
+                    self.logger.error(traceback.format_exc())
+            
+            # Fallback approach: map aligned boundaries directly back to original space
+            # We'll use the inverse of the transformation we performed
+            
+            # Calculate an approximate mapping from aligned to original
+            # For simplicity, we'll just map the min and max Y values
+            try:
+                # Create test points at the aligned boundaries
+                test_min_point = np.array([x_idx, posterior_edge, sliceZ])
+                test_max_point = np.array([x_idx, anterior_edge, sliceZ])
+                
+                # Center these points
+                centered_min = test_min_point - center_of_mass
+                centered_max = test_max_point - center_of_mass
+                
+                # Apply inverse rotation
+                original_min = np.dot(centered_min, inverse_rotation.T) + center_of_mass
+                original_max = np.dot(centered_max, inverse_rotation.T) + center_of_mass
+                
+                # Extract Y coordinates
+                canal_min_y = int(original_min[1])
+                canal_max_y = int(original_max[1])
+                
+                # Add margin to make sure we fully capture the canal
+                canal_min_y = max(0, canal_min_y - 5)
+                canal_max_y = min(binary_mask.shape[1] - 1, canal_max_y + 5)
+                
+                self.logger.info(f"Fallback transformed canal boundaries: min_y={canal_min_y}, max_y={canal_max_y}")
+                
+                return canal_min_y, canal_max_y
+                
+            except Exception as e:
+                self.logger.error(f"Error in canal boundary transformation: {str(e)}")
+                import traceback
+                self.logger.error(traceback.format_exc())
+            
+            # If all else fails, use a simple heuristic
+            canal_min_y = original_shape[1] // 3
+            canal_max_y = 2 * original_shape[1] // 3
+            
+            self.logger.warning(f"Using default canal boundaries: min_y={canal_min_y}, max_y={canal_max_y}")
+            
+            return canal_min_y, canal_max_y
+            
+        except Exception as e:
+            self.logger.error(f"Error in _detect_spinal_canal_with_pca_alignment: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            
+            # Default values on error
+            canal_min_y = 0
+            canal_max_y = self.mask_array.shape[1] // 2
+            return canal_min_y, canal_max_y
+    
+    def _find_spinal_canal_in_aligned_space(self, aligned_mask):
+        """
+        Find the spinal canal in the aligned vertebra space.
+        Uses multiple Z-levels (superior-inferior) to find the best spinal canal seed point.
+        
+        Parameters:
+            aligned_mask: Binary mask of the aligned vertebra
+        
+        Returns:
+            tuple: (y_min, y_max) boundaries of the canal in aligned space
+        """
+        try:
+            from scipy.ndimage import label, binary_erosion
+            import time
+            start_time = time.time()
+            
+            # Find vertebra extents in Z direction
+            aligned_points = np.where(aligned_mask)
+            if len(aligned_points[0]) == 0:
+                self.logger.warning("No points in aligned mask")
+                return aligned_mask.shape[1] // 3, 2 * aligned_mask.shape[1] // 3
+            
+            # Get Z range of the vertebra
+            z_min = np.min(aligned_points[2])
+            z_max = np.max(aligned_points[2])
+            z_range = z_max - z_min + 1
+            
+            self.logger.info(f"Vertebra Z range: {z_min} to {z_max}")
+            
+            # Sample multiple slices through the Z range
+            num_slices = min(10, z_range)  # Try up to 10 slices or as many as we have
+            
+            # We'll collect canal candidates across all slices
+            all_canal_regions = []  # List of tuples: (score, z_level, y_min, y_max)
+            
+            # Try slices throughout the Z range
+            for i in range(num_slices):
+                # Calculate slice position - distribute evenly across the Z range
+                if num_slices > 1:
+                    z_level = int(z_min + (z_range * i) / (num_slices - 1))
+                else:
+                    z_level = int((z_min + z_max) / 2)
+                
+                # Ensure we stay within bounds
+                z_level = max(z_min, min(z_level, z_max))
+                
+                # Extract slice at this Z level
+                slice_mask = aligned_mask[:, :, z_level].copy()
+                
+                # Skip if empty slice
+                if np.sum(slice_mask) == 0:
+                    continue
+                    
+                # Find center of the vertebra in this slice
+                slice_points = np.where(slice_mask)
+                center_x = int(np.mean(slice_points[0]))
+                center_y = int(np.mean(slice_points[1]))
+                
+                # Create inverse mask (0 for vertebra, 1 for background)
+                inv_slice_mask = 1 - slice_mask
+                
+                # Find connected components in the inverse mask
+                labeled_regions, num_regions = label(inv_slice_mask)
+                
+                # Skip if no regions found
+                if num_regions == 0:
+                    continue
+                    
+                # Find posterior edge
+                posterior_edge = center_y
+                while posterior_edge > 0 and slice_mask[center_x, posterior_edge] > 0:
+                    posterior_edge -= 1
+                    
+                # Try to find a good canal region in this slice
+                canal_region = None
+                best_score = float('inf')
+                region_y_min = 0
+                region_y_max = 0
+                
+                # Check all regions
+                for region_id in range(1, num_regions + 1):
+                    region_mask = (labeled_regions == region_id)
+                    region_size = np.sum(region_mask)
+                    
+                    # Skip regions that are too small or too large
+                    if region_size < 10 or region_size > 1000:
+                        continue
+                        
+                    # Get region extents
+                    region_points = np.where(region_mask)
+                    region_center_x = int(np.mean(region_points[0]))
+                    region_center_y = int(np.mean(region_points[1]))
+                    region_y_indices = region_points[1]
+                    local_y_min = np.min(region_y_indices)
+                    local_y_max = np.max(region_y_indices)
+                    
+                    # Calculate score based on:
+                    # 1. X-distance from vertebra center (should be small)
+                    # 2. Y-position relative to posterior edge (should be near posterior edge)
+                    # 3. Size (should be reasonably small)
+                    
+                    x_distance = abs(region_center_x - center_x) / slice_mask.shape[0]
+                    y_dist_from_edge = abs(region_center_y - posterior_edge) / slice_mask.shape[1]
+                    size_factor = region_size / 500  # Normalize size (500 pixels is fairly large)
+                    
+                    # Lower score is better
+                    score = x_distance * 3 + y_dist_from_edge * 2 + size_factor
+                    
+                    # Add a penalty if region is anterior to the center (likely not the canal)
+                    if region_center_y > center_y:
+                        score += 5
+                    
+                    if score < best_score:
+                        best_score = score
+                        canal_region = region_id
+                        region_y_min = local_y_min
+                        region_y_max = local_y_max
+                
+                # If we found a good canal region in this slice
+                if canal_region is not None:
+                    self.logger.info(f"Z-level {z_level}: Found canal candidate with score {best_score:.2f}, y_min={region_y_min}, y_max={region_y_max}")
+                    all_canal_regions.append((best_score, z_level, region_y_min, region_y_max))
+                    
+                    # Create a debug visualization for this canal
+                    if hasattr(slicer, 'mrmlScene'):
+                        debug_canal = np.zeros_like(aligned_mask)
+                        debug_canal[:, :, z_level] = (labeled_regions == canal_region)
+                        debug_canal_node = self._numpy_to_volume(
+                            debug_canal,
+                            self.volume_node
+                        )
+                        if debug_canal_node:
+                            debug_canal_node.SetName(f"DebugCanal_Z{z_level}")
+            
+            # If we found at least one good canal region
+            if all_canal_regions:
+                # Sort by score (lowest is best)
+                all_canal_regions.sort(key=lambda x: x[0])
+                
+                # Choose the best one
+                best_region = all_canal_regions[0]
+                best_score, best_z, best_y_min, best_y_max = best_region
+                
+                self.logger.info(f"Best canal found at Z={best_z} with score {best_score:.2f}")
+                
+                # Add margins
+                y_min = max(0, best_y_min - 5)
+                y_max = min(aligned_mask.shape[1] - 1, best_y_max + 5)
+                
+                return y_min, y_max
+            
+            self.logger.warning("No good canal regions found across Z slices, using fallback method")
+            
+            # Fallback: use the middle slice
+            middle_z = int((z_min + z_max) / 2)
+            middle_slice = aligned_mask[:, :, middle_z].copy()
+            
+            # Find center of vertebra
+            middle_points = np.where(middle_slice)
+            if len(middle_points[0]) > 0:
+                middle_x = int(np.mean(middle_points[0]))
+                middle_y = int(np.mean(middle_points[1]))
+                
+                # Find posterior edge
+                posterior_edge = middle_y
+                while posterior_edge > 0 and middle_slice[middle_x, posterior_edge] > 0:
+                    posterior_edge -= 1
+                    
+                # Find anterior edge
+                anterior_edge = posterior_edge
+                while anterior_edge < middle_slice.shape[1] - 1 and middle_slice[middle_x, anterior_edge] == 0:
+                    anterior_edge += 1
+                    
+                self.logger.info(f"Fallback edges: posterior={posterior_edge}, anterior={anterior_edge}")
+                
+                # Add margins
+                y_min = max(0, posterior_edge - 5)
+                y_max = min(aligned_mask.shape[1] - 1, anterior_edge + 5)
+                
+                return y_min, y_max
+                
+            # If all else fails, use simple division
+            y_min = aligned_mask.shape[1] // 3
+            y_max = 2 * aligned_mask.shape[1] // 3
+            
+            self.logger.info(f"Using default canal boundaries: y_min={y_min}, y_max={y_max}")
+            self.logger.info(f"Canal detection took {time.time() - start_time:.2f} seconds")
+            
+            return y_min, y_max
+            
+        except Exception as e:
+            self.logger.error(f"Error finding spinal canal: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            
+            # Default to simple division
+            return aligned_mask.shape[1] // 3, 2 * aligned_mask.shape[1] // 3
+        
+    def _calculate_centroid_with_label(self, mask_array, target_level=None, threshold=0):
+        """
+        Calculate the centroid of non-zero voxels in a binary mask for a specific vertebra level.
+        
+        Parameters:
+            mask_array: 3D numpy array of the segmentation mask
+            target_level: Target level string (e.g., 'L4')
+            threshold: Minimum value to consider as part of the object
+            
+        Returns:
+            numpy.ndarray: [x, y, z] coordinates of centroid
+        """
+        try:
+            # If no target level specified, fall back to regular centroid calculation
+            if target_level is None:
+                return self._calculate_centroid(mask_array, threshold)
+                
+            # Find which label corresponds to the target level
+            level_label = None
+            
+            # If we have a segmentation labelmap with proper labels
+            if hasattr(self, 'mask_node') and hasattr(self.mask_node, 'GetLabelName'):
+                # Try to find the label corresponding to the target level
+                num_labels = self.mask_node.GetNumberOfLabels()
+                for i in range(num_labels):
+                    label_name = self.mask_node.GetLabelName(i)
+                    if label_name and target_level in label_name:
+                        level_label = i
+                        self.logger.info(f"Found label {level_label} for {target_level}: {label_name}")
+                        break
+            
+            # If we don't have label information, check if the mask has discrete values
+            if level_label is None:
+                # Get unique values in the mask (excluding 0)
+                unique_values = np.unique(mask_array)
+                unique_values = unique_values[unique_values > 0]
+                
+                # Map lumbar levels to typical label values if needed
+                level_mapping = {
+                    'L1': 5,
+                    'L2': 4,
+                    'L3': 3,
+                    'L4': 2,
+                    'L5': 1
+                }
+                
+                # Try to find the label based on the mapping
+                if target_level in level_mapping and level_mapping[target_level] in unique_values:
+                    level_label = level_mapping[target_level]
+                    self.logger.info(f"Using mapped label {level_label} for {target_level}")
+                elif len(unique_values) == 1:
+                    # If there's only one segmentation, use it
+                    level_label = unique_values[0]
+                    self.logger.info(f"Using only available label {level_label}")
+                else:
+                    # Can't determine which label to use
+                    self.logger.warning(f"Cannot determine label for {target_level}, using all segmentations")
+            
+            # Create a mask for the specified vertebra
+            vertebra_mask = None
+            if level_label is not None:
+                vertebra_mask = (mask_array == level_label)
+                self.logger.info(f"Created mask for label {level_label} with {np.count_nonzero(vertebra_mask)} voxels")
+                
+                # If the mask is empty, fall back to using all non-zero voxels
+                if np.count_nonzero(vertebra_mask) == 0:
+                    self.logger.warning(f"Empty mask for label {level_label}, using all non-zero voxels")
+                    vertebra_mask = (mask_array > threshold)
+            else:
+                # If we can't determine the label, use all non-zero voxels
+                vertebra_mask = (mask_array > threshold)
+                
+            # Find indices of non-zero voxels in the filtered mask
+            indices = np.where(vertebra_mask)
+            
+            if len(indices[0]) == 0:
+                self.logger.warning("No voxels above threshold for centroid calculation")
+                return self.insertion_point
+            
+            # Calculate mean position in IJK coordinates
+            centroid_ijk = np.array([
+                np.mean(indices[0]),
+                np.mean(indices[1]),
+                np.mean(indices[2])
+            ])
+            
+            # Convert from IJK to RAS
+            centroid_ras = self._ijk_to_ras(centroid_ijk)
+            
+            self.logger.info(f"Calculated centroid for {target_level}: IJK={centroid_ijk}, RAS={centroid_ras}")
+            return centroid_ras
+            
+        except Exception as e:
+            self.logger.error(f"Error in _calculate_centroid_with_label: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            
+            # Fall back to the insertion point in case of error
+            return self.insertion_point
         
 def visualize_critical_points(vertebra):
     """
