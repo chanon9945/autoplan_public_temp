@@ -1,7 +1,7 @@
 import numpy as np
 import vtk
 from vtkmodules.util import numpy_support
-from .PCAUtils import apply_pca
+from .PCAUtils import apply_pca, select_best_alignment_vector
 import logging
 import slicer
 import traceback
@@ -88,7 +88,6 @@ class Vertebra:
                 else:
                     # It's probably a vtkImageData, not a volume node
                     self.logger.warning(f"Expected vtkMRMLVolumeNode but got {class_name}")
-                    # We'll still use it, but some operations may fail
                     self.volume_node = volume_node
             else:
                 # Assume it's a vtkImageData or similar
@@ -111,106 +110,10 @@ class Vertebra:
                 self.maskedVolume.SetName("MaskedVertebraVolume")
             
             # Calculate centroid of the vertebra
-            self.centroid = self._calculate_centroid_with_label(self.mask_array)
+            self.centroid = self._calculate_centroid_with_label(self.mask_array, target_level)
             self.logger.info(f"Vertebra centroid (RAS): {self.centroid}")
             
-            # Convert centroid to IJK for debugging
-            centroid_ijk = self._ras_to_ijk(self.centroid)
-            self.logger.info(f"Vertebra centroid (IJK): {centroid_ijk}")
-            
-            # Find spinal canal using the improved method
-            canal_min_y, canal_max_y = self._detect_spinal_canal_improved()
-            self.logger.info(f"Spinal canal boundaries: min_y={canal_min_y}, max_y={canal_max_y}")
-            
-            # Cut out pedicle region using the label-aware approach
-            self.pedicle_array = self._cut_pedicle_with_label(
-                self.masked_volume_array.copy(), 
-                self.mask_array,
-                canal_max_y, 
-                canal_min_y, 
-                target_level,
-                buffer_front=15,
-                buffer_end=12
-            )
-            
-            # Create debug volume for pedicle
-            pedicle_debug = self._numpy_to_volume(self.pedicle_array, self.volume_node)
-            if pedicle_debug:
-                pedicle_debug.SetName("DebugPedicle")
-                self.logger.info(f"Pedicle array shape: {self.pedicle_array.shape}, non-zero elements: {np.count_nonzero(self.pedicle_array)}")
-            
-            # Separate relevant side (left/right based on insertion point)
-            self.pedicle_roi_array = self._cut_pedicle_side(
-                self.pedicle_array.copy(),
-                self.insertion_point[0],
-                self.centroid[0]
-            )
-            
-            # Create debug volume for pedicle ROI
-            pedicle_roi_debug = self._numpy_to_volume(self.pedicle_roi_array, self.volume_node)
-            if pedicle_roi_debug:
-                pedicle_roi_debug.SetName("DebugPedicleROI")
-                self.logger.info(f"Pedicle ROI array shape: {self.pedicle_roi_array.shape}, non-zero elements: {np.count_nonzero(self.pedicle_roi_array)}")
-            
-            # Create point cloud for the pedicle
-            self.pedicle_point_cloud = self._array_to_point_cloud(
-                self.pedicle_roi_array, 
-                self.volume_node,
-                threshold=0
-            )
-            
-            if self.pedicle_point_cloud:
-                num_points = self.pedicle_point_cloud.GetNumberOfPoints()
-                self.logger.info(f"Pedicle point cloud has {num_points} points")
-                
-                # Create a visual model from point cloud for debugging
-                if num_points > 0 and hasattr(slicer, 'mrmlScene'):
-                    debug_model = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "DebugPediclePointCloud")
-                    debug_model.SetAndObservePolyData(self.pedicle_point_cloud)
-                    debug_model.CreateDefaultDisplayNodes()
-                    display_node = debug_model.GetDisplayNode()
-                    if display_node:
-                        display_node.SetColor(1.0, 0.0, 0.0)  # Red
-                        display_node.SetRepresentation(display_node.PointsRepresentation)
-                        display_node.SetPointSize(5.0)
-            
-            # Perform PCA on pedicle points
-            if self.pedicle_point_cloud and self.pedicle_point_cloud.GetNumberOfPoints() > 0:
-                points_array = self._points_to_numpy(self.pedicle_point_cloud.GetPoints())
-                self.logger.info(f"Points array shape for PCA: {points_array.shape}")
-                
-                if points_array.shape[0] >= 3:
-                    # Run PCA
-                    self.coeff, self.latent, self.score = apply_pca(points_array)
-                    self.pedicle_center_point = np.mean(points_array, axis=0)
-                    
-                    # Scale eigenvectors by eigenvalues for visualization
-                    scaling_factor = np.sqrt(self.latent) * 2
-                    self.pcaVectors = self.coeff * scaling_factor[:, np.newaxis]
-                    self.logger.info(f"PCA principal axis: {self.pcaVectors[:, 2]}")
-                    self.logger.info(f"Pedicle center point: {self.pedicle_center_point}")
-                    
-                    # Create a fiducial for the pedicle center point
-                    if hasattr(slicer, 'mrmlScene'):
-                        fiducial_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "PedicleCenterPoint")
-                        fiducial_node.AddFiducial(*self.pedicle_center_point)
-                        fiducial_node.SetNthFiducialLabel(0, "Pedicle Center")
-                        fiducial_node.CreateDefaultDisplayNodes()
-                        display_node = fiducial_node.GetDisplayNode()
-                        if display_node:
-                            display_node.SetSelectedColor(0.0, 1.0, 0.0)  # Green
-                            display_node.SetGlyphScale(3.0)
-                    
-                    # Visualize PCA axes
-                    self._visualize_pca_axes()
-                else:
-                    self.logger.warning(f"Not enough points for PCA: {points_array.shape}")
-                    self._set_default_values()
-            else:
-                self.logger.warning("No pedicle point cloud available for PCA")
-                self._set_default_values()
-            
-            # Extract surface points for collision detection
+            # Extract surface for collision detection
             self.surface_array = self._extract_surface_voxels(self.mask_array)
             self.point_cloud = self._array_to_point_cloud(
                 self.surface_array,
@@ -218,14 +121,33 @@ class Vertebra:
                 threshold=0
             )
             
-            if self.point_cloud:
-                num_surface_points = self.point_cloud.GetNumberOfPoints()
-                self.logger.info(f"Surface point cloud has {num_surface_points} points")
+            # REMOVED: Old pedicle detection using canal-based approach
+            
+            # NEW: Detect pedicle center and border using the smallest cross-section approach
+            self.pedicle_center_point, self.pedicle_border_cloud, self.pcaVectors = \
+                self.detect_pedicle_center_and_border(target_level)
+            
+            self.logger.info(f"Pedicle center point: {self.pedicle_center_point}")
+            self.logger.info(f"PCA principal vectors: {self.pcaVectors}")
+            
+            # Create a fiducial for the pedicle center point
+            if hasattr(slicer, 'mrmlScene') and self.pedicle_center_point is not None:
+                fiducial_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "PedicleCenterPoint")
+                fiducial_node.AddFiducial(*self.pedicle_center_point)
+                fiducial_node.SetNthFiducialLabel(0, "Pedicle Center")
+                fiducial_node.CreateDefaultDisplayNodes()
+                display_node = fiducial_node.GetDisplayNode()
+                if display_node:
+                    display_node.SetSelectedColor(0.0, 1.0, 0.0)  # Green
+                    display_node.SetGlyphScale(3.0)
+            
+            # Visualize PCA axes
+            self._visualize_pca_axes()
             
             # Clean up temporary node
             if temp_labelmap_node:
                 slicer.mrmlScene.RemoveNode(temp_labelmap_node)
-                
+                    
         except Exception as e:
             self.logger.error(f"Error initializing Vertebra: {str(e)}")
             self.logger.error(traceback.format_exc())
@@ -249,60 +171,142 @@ class Vertebra:
             self.logger.warning("Using insertion point as pedicle center due to calculation failure")
     
     def _visualize_pca_axes(self):
-        """Create visual models for PCA axes"""
+        """
+        Create visual models for PCA axes of both the whole vertebra and the pedicle,
+        highlighting the best-aligned axis for the vertebra.
+        """
         if not hasattr(slicer, 'mrmlScene'):
             return
         
-        if not hasattr(self, 'pcaVectors') or not hasattr(self, 'pedicle_center_point'):
-            return
-        
-        # Colors for the three axes
-        axis_colors = [
-            (1.0, 0.0, 0.0),  # Red - First axis
-            (0.0, 1.0, 0.0),  # Green - Second axis
-            (0.0, 0.0, 1.0)   # Blue - Third axis
-        ]
-        
-        # Display length for axes
-        display_length = 20.0  # mm
-        
-        for i in range(3):
-            axis_vector = self.pcaVectors[:, i]
-            vector_length = np.linalg.norm(axis_vector)
+        # Visualize whole vertebra PCA axes
+        if hasattr(self, 'pcaVectors') and hasattr(self, 'vertebra_center_ras'):
+            # Colors for the three axes
+            axis_colors = [
+                (1.0, 0.0, 0.0),  # Red - First axis
+                (0.0, 1.0, 0.0),  # Green - Second axis
+                (0.0, 0.0, 1.0)   # Blue - Third axis
+            ]
             
-            if vector_length < 1e-6:
-                continue
+            # Display length for axes
+            display_length = 30.0  # mm for vertebra axes (longer for better visibility)
+            
+            # Get the best-aligned axis index (default to 0 if not available)
+            best_axis_idx = getattr(self, 'best_aligned_pca_idx', 0)
+            
+            for i in range(3):
+                axis_vector = self.pcaVectors[:, i]
+                vector_length = np.linalg.norm(axis_vector)
                 
-            # Normalize and scale vector
-            axis_vector = axis_vector / vector_length * display_length
-            
-            # Create line endpoints
-            start_point = self.pedicle_center_point - axis_vector/2
-            end_point = self.pedicle_center_point + axis_vector/2
-            
-            # Create line source
-            line_source = vtk.vtkLineSource()
-            line_source.SetPoint1(start_point)
-            line_source.SetPoint2(end_point)
-            line_source.Update()
-            
-            # Create model node
-            model_name = f"PCA_Axis_{i+1}"
-            model_node = slicer.mrmlScene.GetFirstNodeByName(model_name)
-            if not model_node:
+                if vector_length < 1e-6:
+                    continue
+                    
+                # Normalize and scale vector
+                axis_vector = axis_vector / vector_length * display_length
+                
+                # Create line endpoints
+                start_point = self.vertebra_center_ras - axis_vector/2
+                end_point = self.vertebra_center_ras + axis_vector/2
+                
+                # Create line source
+                line_source = vtk.vtkLineSource()
+                line_source.SetPoint1(start_point)
+                line_source.SetPoint2(end_point)
+                line_source.Update()
+                
+                # Create model node
+                model_name = f"Vertebra_PCA_Axis_{i+1}"
+                if i == best_axis_idx:
+                    model_name = f"Vertebra_PCA_Axis_{i+1}_BestAligned"
+                
+                model_node = slicer.mrmlScene.GetFirstNodeByName(model_name)
+                if model_node:
+                    # If the node exists, remove it first to avoid errors
+                    slicer.mrmlScene.RemoveNode(model_node)
+                    
+                # Create a new model node
                 model_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", model_name)
-            
-            model_node.SetAndObservePolyData(line_source.GetOutput())
-            
-            # Create display node if needed
-            if not model_node.GetDisplayNode():
+                model_node.SetAndObservePolyData(line_source.GetOutput())
+                
+                # Create display node
                 display_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelDisplayNode")
                 model_node.SetAndObserveDisplayNodeID(display_node.GetID())
-            
-            # Set display properties
-            display_node = model_node.GetDisplayNode()
-            display_node.SetColor(*axis_colors[i])
-            display_node.SetLineWidth(3.0)
+                
+                # Set display properties
+                # Highlight the best-aligned axis with a different appearance
+                if i == best_axis_idx:
+                    # Make the best-aligned axis yellow and thicker
+                    display_node.SetColor(1.0, 1.0, 0.0)  # Yellow
+                    display_node.SetLineWidth(5.0)  # Thicker line
+                else:
+                    display_node.SetColor(*axis_colors[i])
+                    display_node.SetLineWidth(3.0)
+        
+        # Optionally visualize pedicle PCA axes if available and different from vertebra PCA
+        if hasattr(self, 'pedicle_coeff') and hasattr(self, 'pedicle_center_point'):
+            # Check if we need to visualize separate pedicle axes
+            # For simplicity, we'll just check if center points are different
+            same_centers = False
+            if hasattr(self, 'vertebra_center_ras'):
+                same_centers = np.allclose(self.vertebra_center_ras, self.pedicle_center_point, atol=5.0)
+                
+            if not same_centers:  # Only visualize if they're distinct
+                # Use a shorter display length for pedicle axes to differentiate
+                pedicle_display_length = 15.0  # mm
+                
+                # Different color scheme for pedicle axes
+                pedicle_axis_colors = [
+                    (1.0, 0.5, 0.5),  # Light red
+                    (0.5, 1.0, 0.5),  # Light green
+                    (0.5, 0.5, 1.0)   # Light blue
+                ]
+                
+                # Calculate and scale the pedicle eigenvectors
+                if hasattr(self, 'pedicle_latent'):
+                    scaling_factor = np.sqrt(self.pedicle_latent) * 2
+                    pedicle_vectors = self.pedicle_coeff * scaling_factor[:, np.newaxis]
+                else:
+                    # If latent values not available, just use normalized vectors
+                    pedicle_vectors = np.copy(self.pedicle_coeff)
+                
+                for i in range(3):
+                    axis_vector = pedicle_vectors[i]
+                    vector_length = np.linalg.norm(axis_vector)
+                    
+                    if vector_length < 1e-6:
+                        continue
+                        
+                    # Normalize and scale vector
+                    axis_vector = axis_vector / vector_length * pedicle_display_length
+                    
+                    # Create line endpoints
+                    start_point = self.pedicle_center_point - axis_vector/2
+                    end_point = self.pedicle_center_point + axis_vector/2
+                    
+                    # Create line source
+                    line_source = vtk.vtkLineSource()
+                    line_source.SetPoint1(start_point)
+                    line_source.SetPoint2(end_point)
+                    line_source.Update()
+                    
+                    # Create model node
+                    model_name = f"Pedicle_PCA_Axis_{i+1}"
+                    
+                    model_node = slicer.mrmlScene.GetFirstNodeByName(model_name)
+                    if model_node:
+                        # If the node exists, remove it first to avoid errors
+                        slicer.mrmlScene.RemoveNode(model_node)
+                        
+                    # Create a new model node
+                    model_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", model_name)
+                    model_node.SetAndObservePolyData(line_source.GetOutput())
+                    
+                    # Create display node
+                    display_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelDisplayNode")
+                    model_node.SetAndObserveDisplayNodeID(display_node.GetID())
+                    
+                    # Set display properties
+                    display_node.SetColor(*pedicle_axis_colors[i])
+                    display_node.SetLineWidth(2.0)  # Thinner line than vertebra axes
     
     def _ras_to_ijk(self, ras_point):
         """
@@ -1286,7 +1290,6 @@ class Vertebra:
         try:
             import time
             from scipy.spatial.transform import Rotation as R
-            from sklearn.decomposition import PCA
             
             start_time = time.time()
             
@@ -1354,53 +1357,80 @@ class Vertebra:
             # Apply the vertebra mask to isolate the target vertebra
             masked_volume = result * vertebra_mask
             
-            # Step 1: Perform PCA to find principal axes of the vertebra
-            pca_start_time = time.time()
-            
-            # Get coordinates of all non-zero voxels in the vertebra mask
-            nonzero_coords = np.where(vertebra_mask)
-            if len(nonzero_coords[0]) < 10:  # Need enough points for meaningful PCA
-                self.logger.warning(f"Not enough voxels ({len(nonzero_coords[0])}) for PCA")
-                # Fall back to original canal detection
-                level_y_min, level_y_max = self._detect_spinal_canal_improved(target_level)
+            # Step 1: Use the pre-computed PCA results from initialization if available
+            if hasattr(self, 'pcaVectors') and hasattr(self, 'best_aligned_pca_idx') and hasattr(self, 'vertebra_center_ras'):
+                pca_start_time = time.time()
                 
-                # Apply original cutting method
-                y_min_idx = max(0, min(int(level_y_min + buffer_front + 1), masked_volume.shape[1] - 1))
-                y_max_idx = max(0, min(int(level_y_max - buffer_end), masked_volume.shape[1] - 1))
+                # Get the best-aligned principal axis
+                main_axis = self.pcaVectors[:, self.best_aligned_pca_idx]
+                main_axis = main_axis / np.linalg.norm(main_axis)  # Ensure it's normalized
                 
-                pedicle_result = masked_volume.copy()
-                pedicle_result[:, 0:y_min_idx, :] = 0
-                pedicle_result[:, y_max_idx:, :] = 0
+                # Create a rotation matrix to align the main axis with the Y axis (anterior-posterior)
+                target_axis = np.array([0, 1, 0])  # Align with Y axis
                 
-                self.logger.info(f"Fallback pedicle cutting took {time.time() - start_time:.2f} seconds")
-                return pedicle_result
+                # Use the vertebra center point
+                center_of_mass_ras = self.vertebra_center_ras
+                
+                # Convert to IJK coordinates for the transformation
+                center_of_mass = self._ras_to_ijk(center_of_mass_ras)
+                
+                # Create rotation that aligns main_axis with the target_axis
+                rotation = R.align_vectors([target_axis], [main_axis])[0]
+                rotation_matrix = rotation.as_matrix()
+                
+                self.logger.info(f"Using pre-computed PCA axis {self.best_aligned_pca_idx} for alignment")
+                self.logger.info(f"Alignment score: {getattr(self, 'pca_alignment_score', 'unknown')}")
+                self.logger.info(f"Using vertebra center: {center_of_mass}")
+            else:
+                # Fallback: Calculate PCA in this function if not already available
+                self.logger.warning("No pre-computed PCA available, calculating in _cut_pedicle_with_label")
+                
+                pca_start_time = time.time()
+                
+                # Get coordinates of all non-zero voxels in the vertebra mask
+                nonzero_coords = np.where(vertebra_mask)
+                if len(nonzero_coords[0]) < 10:  # Need enough points for meaningful PCA
+                    self.logger.warning(f"Not enough voxels ({len(nonzero_coords[0])}) for PCA")
+                    # Fall back to original canal detection
+                    level_y_min, level_y_max = self._detect_spinal_canal_improved(target_level)
+                    
+                    # Apply original cutting method
+                    y_min_idx = max(0, min(int(level_y_min + buffer_front + 1), masked_volume.shape[1] - 1))
+                    y_max_idx = max(0, min(int(level_y_max - buffer_end), masked_volume.shape[1] - 1))
+                    
+                    pedicle_result = masked_volume.copy()
+                    pedicle_result[:, 0:y_min_idx, :] = 0
+                    pedicle_result[:, y_max_idx:, :] = 0
+                    
+                    self.logger.info(f"Fallback pedicle cutting took {time.time() - start_time:.2f} seconds")
+                    return pedicle_result
+                
+                # Convert to (n_points, n_dims) array for PCA
+                points = np.vstack([nonzero_coords[0], nonzero_coords[1], nonzero_coords[2]]).T
+                
+                # Perform PCA
+                from sklearn.decomposition import PCA
+                pca = PCA(n_components=3)
+                pca.fit(points)
+                
+                # Get principal components
+                principal_axes = pca.components_
+                
+                # Use the select_best_alignment_vector function to find the best axis
+                from .PCAUtils import select_best_alignment_vector
+                target_axis = np.array([0, 1, 0])  # Y-axis (posterior-anterior direction)
+                best_idx, main_axis, alignment_score = select_best_alignment_vector(principal_axes, target_axis)
+                
+                self.logger.info(f"Selected PCA axis {best_idx} with alignment score {alignment_score:.4f} to Y-axis")
+                
+                # Calculate the center of mass of the vertebra
+                center_of_mass = np.mean(points, axis=0)
+                
+                # Create rotation that aligns main_axis with the target_axis
+                rotation = R.align_vectors([target_axis], [main_axis])[0]
+                rotation_matrix = rotation.as_matrix()
             
-            # Convert to (n_points, n_dims) array for PCA
-            points = np.vstack([nonzero_coords[0], nonzero_coords[1], nonzero_coords[2]]).T
-            
-            # Perform PCA
-            pca = PCA(n_components=3)
-            pca.fit(points)
-            
-            # Get principal components
-            principal_axes = pca.components_
-            
-            # The first principal component should be along the main axis of the vertebra
-            main_axis = principal_axes[0]
-            
-            # Create a rotation matrix to align the main axis with the Y axis (anterior-posterior)
-            target_axis = np.array([0, 1, 0])  # Align with Y axis
-            
-            # Calculate the center of mass of the vertebra
-            center_of_mass = np.mean(points, axis=0)
-            
-            # Create rotation that aligns main_axis with the target_axis
-            rotation = R.align_vectors([target_axis], [main_axis])[0]
-            rotation_matrix = rotation.as_matrix()
-            
-            self.logger.info(f"PCA took {time.time() - pca_start_time:.2f} seconds")
-            self.logger.info(f"Principal axes: {principal_axes}")
-            self.logger.info(f"Center of mass: {center_of_mass}")
+            self.logger.info(f"PCA/alignment lookup took {time.time() - pca_start_time:.2f} seconds")
             
             # Step 2: Transform the vertebra to aligned space
             transform_start_time = time.time()
@@ -1697,6 +1727,7 @@ class Vertebra:
         """
         Detect the anterior and posterior boundaries of the spinal canal
         using PCA-based alignment of the vertebra to handle tilted vertebrae.
+        Uses the best-aligned PCA axis computed during initialization.
         
         Parameters:
             target_level: Target vertebra level (e.g., 'L4', 'L5')
@@ -1775,51 +1806,73 @@ class Vertebra:
             # Report the time taken for mask creation
             self.logger.info(f"Mask creation took {time.time() - start_time:.2f} seconds")
             
-            # Now let's perform PCA on the vertebra voxels to find principal axes
+            # Step 1: Use the pre-computed PCA results from initialization if available
             pca_start_time = time.time()
             
-            # Get coordinates of all non-zero voxels in the binary mask
-            nonzero_coords = np.where(binary_mask)
-            if len(nonzero_coords[0]) < 10:  # Need enough points for meaningful PCA
-                self.logger.warning(f"Not enough voxels ({len(nonzero_coords[0])}) for PCA")
-                # Fall back to original method
-                return self._detect_spinal_canal_improved(target_level)
-            
-            # Convert to (n_points, n_dims) array for PCA
-            points = np.vstack([nonzero_coords[0], nonzero_coords[1], nonzero_coords[2]]).T
-            
-            # Perform PCA
-            from sklearn.decomposition import PCA
-            pca = PCA(n_components=3)
-            pca.fit(points)
-            
-            # Get principal components
-            principal_axes = pca.components_
-            
-            # The first principal component should be along the main axis of the vertebra
-            main_axis = principal_axes[0]
-            
-            # Create a rotation matrix to align the main axis with the Y axis (anterior-posterior)
-            from scipy.spatial.transform import Rotation as R
-            
-            # Determine if the main axis is more aligned with X, Y, or Z
-            abs_main_axis = np.abs(main_axis)
-            dominant_axis_idx = np.argmax(abs_main_axis)
-            
-            # We want to align with the Y axis (anterior-posterior)
-            target_axis = np.array([0, 1, 0])
-            
-            # Create rotation that aligns main_axis with the target_axis
-            rotation_matrix = R.align_vectors([target_axis], [main_axis])[0].as_matrix()
+            if hasattr(self, 'pcaVectors') and hasattr(self, 'best_aligned_pca_idx') and hasattr(self, 'vertebra_center_ras'):
+                # Get the best-aligned principal axis
+                main_axis = self.pcaVectors[:, self.best_aligned_pca_idx]
+                main_axis = main_axis / np.linalg.norm(main_axis)  # Ensure it's normalized
+                
+                # Create a rotation matrix to align the main axis with the Y axis (anterior-posterior)
+                from scipy.spatial.transform import Rotation as R
+                
+                target_axis = np.array([0, 1, 0])  # Y-axis (anterior-posterior direction)
+                
+                # Use the vertebra center point
+                center_of_mass_ras = self.vertebra_center_ras
+                
+                # Convert to IJK coordinates for the transformation
+                center_of_mass = self._ras_to_ijk(center_of_mass_ras)
+                
+                # Create rotation that aligns main_axis with the target_axis
+                rotation = R.align_vectors([target_axis], [main_axis])[0]
+                rotation_matrix = rotation.as_matrix()
+                
+                self.logger.info(f"Using pre-computed PCA axis {self.best_aligned_pca_idx} for alignment")
+                self.logger.info(f"Alignment score: {getattr(self, 'pca_alignment_score', 'unknown')}")
+            else:
+                # Perform PCA on the binary mask if pre-computed is not available
+                self.logger.warning("No pre-computed PCA available, calculating in _detect_spinal_canal_with_pca_alignment")
+                
+                # Get coordinates of all non-zero voxels in the binary mask
+                nonzero_coords = np.where(binary_mask)
+                if len(nonzero_coords[0]) < 10:  # Need enough points for meaningful PCA
+                    self.logger.warning(f"Not enough voxels ({len(nonzero_coords[0])}) for PCA")
+                    # Fall back to original method
+                    return self._detect_spinal_canal_improved(target_level)
+                
+                # Convert to (n_points, n_dims) array for PCA
+                points = np.vstack([nonzero_coords[0], nonzero_coords[1], nonzero_coords[2]]).T
+                
+                # Perform PCA
+                from sklearn.decomposition import PCA
+                pca = PCA(n_components=3)
+                pca.fit(points)
+                
+                # Get principal components
+                principal_axes = pca.components_
+                
+                # Find the axis that best aligns with the Y axis (anterior-posterior)
+                from .PCAUtils import select_best_alignment_vector
+                target_axis = np.array([0, 1, 0])  # Y-axis (anterior-posterior direction)
+                best_idx, main_axis, alignment_score = select_best_alignment_vector(principal_axes, target_axis)
+                
+                self.logger.info(f"Selected PCA axis {best_idx} with alignment score {alignment_score:.4f} to Y-axis")
+                
+                # Calculate the center of mass
+                center_of_mass = np.mean(points, axis=0)
+                
+                # Create rotation that aligns main_axis with the target_axis
+                from scipy.spatial.transform import Rotation as R
+                rotation = R.align_vectors([target_axis], [main_axis])[0]
+                rotation_matrix = rotation.as_matrix()
             
             # Report the time taken for PCA
             self.logger.info(f"PCA took {time.time() - pca_start_time:.2f} seconds")
             
             # Now we need to apply this rotation to our binary mask
             transform_start_time = time.time()
-            
-            # Calculate the center of mass of the vertebra (for centering the transform)
-            center_of_mass = np.mean(points, axis=0)
             
             # Get the original image dimensions
             original_shape = binary_mask.shape
@@ -2368,6 +2421,699 @@ class Vertebra:
             # Fall back to the insertion point in case of error
             return self.insertion_point
         
+    def _numpy_to_vtk_polydata(self, points):
+        """
+        Convert numpy array of points to vtkPolyData.
+        
+        Parameters:
+            points: Numpy array of points (n_points × 3)
+            
+        Returns:
+            vtkPolyData: VTK polydata object containing the points
+        """
+        import vtk
+        import numpy as np
+        
+        if points is None or len(points) == 0:
+            # Return empty polydata
+            polydata = vtk.vtkPolyData()
+            polydata.SetPoints(vtk.vtkPoints())
+            return polydata
+        
+        # Create vtkPoints object
+        vtk_points = vtk.vtkPoints()
+        vtk_points.SetNumberOfPoints(len(points))
+        
+        # Set the points
+        for i in range(len(points)):
+            vtk_points.SetPoint(i, points[i][0], points[i][1], points[i][2])
+        
+        # Create vtkPolyData
+        polydata = vtk.vtkPolyData()
+        polydata.SetPoints(vtk_points)
+        
+        # Add vertices (improves rendering)
+        vertices = vtk.vtkCellArray()
+        for i in range(vtk_points.GetNumberOfPoints()):
+            vertices.InsertNextCell(1)
+            vertices.InsertCellPoint(i)
+        
+        polydata.SetVerts(vertices)
+        
+        return polydata
+    
+    def transform_to_aligned_space(self, points, center_of_mass, rotation_matrix):
+        """
+        Transform points from original space to aligned space.
+        
+        Parameters:
+            points: Numpy array of points to transform
+            center_of_mass: Center of mass used for alignment
+            rotation_matrix: Rotation matrix used for alignment
+            
+        Returns:
+            numpy.ndarray: Transformed points in aligned space
+        """
+        import numpy as np
+        from scipy.spatial.transform import Rotation as R
+        
+        if points is None:
+            return None
+        
+        # Convert to numpy array if it's not already
+        if not isinstance(points, np.ndarray):
+            points = np.array(points)
+        
+        # Reshape to handle both single points and arrays
+        original_shape = points.shape
+        if len(original_shape) == 1:
+            points = points.reshape(1, -1)
+        
+        # Create rotation object from matrix
+        rotation = R.from_matrix(rotation_matrix)
+        
+        # Apply rotation
+        centered_points = points - center_of_mass
+        aligned_points = rotation.apply(centered_points) + center_of_mass
+        
+        # Restore original shape if it was a single point
+        if len(original_shape) == 1:
+            aligned_points = aligned_points[0]
+        
+        return aligned_points
+
+    def transform_to_original_space(self, points, center_of_mass, rotation_matrix):
+        """
+        Transform points from aligned space back to original space.
+        
+        Parameters:
+            points: Numpy array of points to transform
+            center_of_mass: Center of mass used for alignment
+            rotation_matrix: Rotation matrix used for alignment
+            
+        Returns:
+            numpy.ndarray: Transformed points in original space
+        """
+        import numpy as np
+        from scipy.spatial.transform import Rotation as R
+        
+        if points is None or len(points) == 0:
+            return None
+        
+        # Create rotation object from matrix
+        rotation = R.from_matrix(rotation_matrix)
+        
+        # Reshape for single point case
+        original_shape = points.shape
+        if len(original_shape) == 1:
+            points = points.reshape(1, -1)
+        
+        # Apply inverse rotation
+        centered_points = points - center_of_mass
+        original_points = rotation.inv().apply(centered_points) + center_of_mass
+        
+        # Restore original shape if it was a single point
+        if len(original_shape) == 1:
+            original_points = original_points[0]
+        
+        return original_points
+        
+    def _get_level_specific_mask(self, target_level=None):
+        """
+        Get a binary mask for the specific vertebra level.
+        
+        Parameters:
+            target_level: Target vertebra level (e.g., 'L4', 'L5')
+            
+        Returns:
+            numpy.ndarray: Binary mask for the specified level
+        """
+        import numpy as np
+        
+        # If no target level specified, use all non-zero voxels
+        if target_level is None:
+            return (self.mask_array > 0).astype(np.uint8)
+        
+        # Find which label corresponds to the target level
+        level_label = None
+        
+        # If we have a segmentation labelmap with proper labels
+        if hasattr(self, 'mask_node') and hasattr(self.mask_node, 'GetLabelName'):
+            # Try to find the label corresponding to the target level
+            num_labels = self.mask_node.GetNumberOfLabels()
+            for i in range(num_labels):
+                label_name = self.mask_node.GetLabelName(i)
+                if label_name and target_level in label_name:
+                    level_label = i
+                    self.logger.info(f"Found label {level_label} for {target_level}: {label_name}")
+                    break
+        
+        # If we don't have label information, check if the mask has discrete values
+        if level_label is None:
+            # Map lumbar levels to typical label values if needed
+            level_mapping = {
+                'L1': 5,
+                'L2': 4,
+                'L3': 3,
+                'L4': 2,
+                'L5': 1
+            }
+            
+            # Get unique values in the mask (excluding 0)
+            unique_values = np.unique(self.mask_array)
+            unique_values = unique_values[unique_values > 0]
+            
+            # Try to find the label based on the mapping
+            if target_level in level_mapping and level_mapping[target_level] in unique_values:
+                level_label = level_mapping[target_level]
+                self.logger.info(f"Using mapped label {level_label} for {target_level}")
+            elif len(unique_values) == 1:
+                # If there's only one segmentation, use it
+                level_label = unique_values[0]
+                self.logger.info(f"Using only available label {level_label}")
+            else:
+                # Can't determine which label to use
+                self.logger.warning(f"Cannot determine label for {target_level}, using all segmentations")
+                return (self.mask_array > 0).astype(np.uint8)
+        
+        # Create level-specific mask
+        if level_label is not None:
+            level_mask = (self.mask_array == level_label)
+            self.logger.info(f"Created mask for label {level_label} with {np.count_nonzero(level_mask)} voxels")
+            
+            # If the mask is empty, fall back to using all segmentations
+            if np.count_nonzero(level_mask) == 0:
+                self.logger.warning(f"Empty mask for label {level_label}, using all segmentations")
+                return (self.mask_array > 0).astype(np.uint8)
+            
+            return level_mask.astype(np.uint8)
+        
+        # Default: use all non-zero voxels
+        return (self.mask_array > 0).astype(np.uint8)
+    
+    def extract_volume_and_surface_clouds(self, target_level=None):
+        """
+        Extract volume and surface point clouds for a specific vertebra level.
+        
+        Parameters:
+            target_level: Target vertebra level (e.g., 'L4', 'L5')
+            
+        Returns:
+            tuple: (volume_cloud, surface_cloud, level_mask) - vtk.vtkPolyData objects and binary mask
+        """
+        # First, get the level-specific mask
+        level_mask = self._get_level_specific_mask(target_level)
+        
+        # Extract volume point cloud
+        volume_cloud = self._array_to_point_cloud(
+            self.volume_array * level_mask,
+            self.volume_node,
+            threshold=0
+        )
+        
+        # Extract surface point cloud
+        surface_voxels = self._extract_surface_voxels(level_mask)
+        surface_cloud = self._array_to_point_cloud(
+            surface_voxels,
+            self.volume_node,
+            threshold=0
+        )
+        
+        return volume_cloud, surface_cloud, level_mask
+    
+    def select_best_alignment_vector(self, coeff, latent):
+        """
+        Select the best PCA vector for alignment based on anatomical directions.
+        
+        The best vector for alignment should be the one that most closely
+        corresponds to the anterior-posterior direction of the vertebra.
+        
+        Parameters:
+            coeff: PCA coefficient matrix (eigenvectors)
+            latent: Eigenvalues from PCA
+            
+        Returns:
+            tuple: (best_vector_idx, best_vector, alignment_confidence)
+        """
+        import numpy as np
+        
+        # RAS coordinate system: x=Right, y=Anterior, z=Superior
+        # In the vertebral anatomy, the primary axis usually runs superior-inferior,
+        # and we want to align with the anterior-posterior axis
+        
+        # Normalized anatomical direction vectors in RAS coordinates
+        ap_axis = np.array([0, 1, 0])  # Anterior-posterior (y-axis)
+        si_axis = np.array([0, 0, 1])  # Superior-inferior (z-axis)
+        rl_axis = np.array([1, 0, 0])  # Right-left (x-axis)
+        
+        # Calculate alignment scores for each PCA vector
+        alignment_scores = []
+        
+        for i in range(len(coeff)):
+            # Normalize the eigenvector
+            vector = coeff[i] / np.linalg.norm(coeff[i])
+            
+            # Calculate absolute dot products with anatomical axes
+            # Higher values mean better alignment
+            ap_score = abs(np.dot(vector, ap_axis))
+            si_score = abs(np.dot(vector, si_axis))
+            rl_score = abs(np.dot(vector, rl_axis))
+            
+            # We prefer vectors that align with anterior-posterior axis
+            # but normalize by eigenvalue to consider variance importance
+            normalized_eigenvalue = latent[i] / sum(latent)
+            alignment_score = ap_score * normalized_eigenvalue
+            
+            alignment_scores.append((i, vector, alignment_score))
+        
+        # Sort by alignment score (highest first)
+        alignment_scores.sort(key=lambda x: x[2], reverse=True)
+        
+        # Return the best match
+        best_idx, best_vector, confidence = alignment_scores[0]
+        
+        self.logger.info(f"Selected PCA vector {best_idx} as best alignment vector")
+        self.logger.info(f"Alignment confidence: {confidence:.4f}")
+        self.logger.info(f"Best alignment vector: {best_vector}")
+        
+        return best_idx, best_vector, confidence
+    
+    def align_point_cloud_with_pca(self, volume_cloud, surface_cloud, level_mask=None):
+        """
+        Align point clouds with the principal component analysis vectors.
+        
+        Parameters:
+            volume_cloud: vtkPolyData of the volume point cloud
+            surface_cloud: vtkPolyData of the surface point cloud
+            level_mask: Binary mask for the specific level (optional)
+            
+        Returns:
+            tuple: (aligned_volume_cloud, aligned_surface_cloud, rotation_matrix, 
+                    center_of_mass, aligned_center, pca_vectors)
+        """
+        import numpy as np
+        from scipy.spatial.transform import Rotation as R
+        
+        # Convert vtkPolyData to numpy array
+        volume_points = self._points_to_numpy(volume_cloud.GetPoints())
+        
+        # Skip if we don't have enough points
+        if volume_points.shape[0] < 10:
+            self.logger.warning("Not enough points for PCA")
+            return volume_cloud, surface_cloud, np.eye(3), np.zeros(3), np.zeros(3), np.eye(3)
+        
+        # Apply PCA
+        coeff, latent, score = apply_pca(volume_points)
+        
+        # Get the center of mass
+        center_of_mass = np.mean(volume_points, axis=0)
+        
+        # Select the best vector for alignment
+        _, main_axis, _ = self.select_best_alignment_vector(coeff, latent)
+        
+        # Target axis for alignment (anterior-posterior is Y axis in RAS)
+        target_axis = np.array([0, 1, 0])
+        
+        # Create rotation matrix to align main_axis with target_axis
+        rotation = R.align_vectors([target_axis], [main_axis])[0]
+        rotation_matrix = rotation.as_matrix()
+        
+        # Transform volume points
+        centered_volume_points = volume_points - center_of_mass
+        aligned_volume_points = rotation.apply(centered_volume_points) + center_of_mass
+        
+        # Create new vtkPolyData for aligned volume
+        aligned_volume_cloud = self._numpy_to_vtk_polydata(aligned_volume_points)
+        
+        # Transform surface points if available
+        aligned_surface_cloud = None
+        if surface_cloud and surface_cloud.GetNumberOfPoints() > 0:
+            surface_points = self._points_to_numpy(surface_cloud.GetPoints())
+            centered_surface_points = surface_points - center_of_mass
+            aligned_surface_points = rotation.apply(centered_surface_points) + center_of_mass
+            aligned_surface_cloud = self._numpy_to_vtk_polydata(aligned_surface_points)
+        
+        # Calculate aligned center
+        aligned_center = np.mean(aligned_volume_points, axis=0)
+        
+        # Scale PCA vectors by eigenvalues for visualization
+        pca_vectors = coeff * np.sqrt(latent)[:, np.newaxis]
+        
+        return aligned_volume_cloud, aligned_surface_cloud, rotation_matrix, center_of_mass, aligned_center, pca_vectors
+    
+    def find_smallest_pedicle_cross_section(self, aligned_volume_cloud, aligned_surface_cloud, aligned_center, center_of_mass, rotation_matrix, insertion_x):
+        """
+        Find the smallest cross-section of the pedicle by moving through the spinal canal.
+        
+        Parameters:
+            aligned_volume_cloud: vtkPolyData of the aligned volume point cloud
+            aligned_surface_cloud: vtkPolyData of the aligned surface point cloud
+            aligned_center: 3D array of the aligned centroid coordinates
+            center_of_mass: Center of mass used for the alignment
+            rotation_matrix: Rotation matrix used for the alignment
+            insertion_x: X coordinate of insertion point in original space
+            
+        Returns:
+            tuple: (min_slice_idx, min_slice_points, min_area) - Index, points, and area of smallest slice
+        """
+        import numpy as np
+        from scipy.spatial import cKDTree
+        
+        # Convert vtkPolyData to numpy array
+        volume_points = self._points_to_numpy(aligned_volume_cloud.GetPoints())
+        
+        if volume_points.shape[0] == 0:
+            self.logger.warning("Empty point cloud, cannot find smallest cross-section")
+            return 0, None, float('inf')
+        
+        # Transform insertion point to aligned space to determine side
+        insertion_point_aligned = self.transform_to_aligned_space(
+            self.insertion_point, center_of_mass, rotation_matrix)
+        
+        # Determine side of interest (left or right based on insertion point)
+        is_left_side = insertion_point_aligned[0] < aligned_center[0]
+        side_text = "left" if is_left_side else "right"
+        self.logger.info(f"Working on {side_text} side based on insertion point at {insertion_point_aligned}")
+        
+        side_filter = volume_points[:, 0] < aligned_center[0] if is_left_side else volume_points[:, 0] > aligned_center[0]
+        side_points = volume_points[side_filter]
+        
+        if len(side_points) == 0:
+            self.logger.warning(f"No points found on the {side_text} side")
+            return 0, None, float('inf')
+        
+        # Build KD-tree for efficient nearest neighbor searches
+        tree = cKDTree(side_points)
+        
+        # Parameters for edge detection - these might need tuning
+        sphere_radius = 5.0      # Search radius in mm
+        point_threshold = 5      # Minimum points to consider as "edge"
+        step_size = 1.0          # Step size for movement in mm
+        search_range = 40.0      # Maximum distance to search for edges
+        
+        # Create a test point at the side of interest, offset from center
+        # We'll start in the expected region of the spinal canal
+        test_x = aligned_center[0] - 15.0 if is_left_side else aligned_center[0] + 15.0
+        start_y = aligned_center[1]
+        test_z = aligned_center[2]
+        
+        # Try to find a point in the void by sampling around the aligned center
+        test_point = np.array([test_x, start_y, test_z])
+        self.logger.info(f"Starting test point: {test_point}")
+        
+        # Check if starting point is in the void (spinal canal)
+        indices = tree.query_ball_point(test_point, sphere_radius)
+        in_void = len(indices) < point_threshold
+        
+        # If not in void, search for the void
+        if not in_void:
+            self.logger.info("Starting point is not in the void, searching for the spinal canal...")
+            
+            # Try different y positions to find the void
+            y_offsets = list(range(-30, 31, 5))  # Try ±30mm in 5mm steps
+            
+            for y_offset in y_offsets:
+                test_point[1] = start_y + y_offset
+                indices = tree.query_ball_point(test_point, sphere_radius)
+                
+                self.logger.info(f"Testing y={test_point[1]}, found {len(indices)} points in sphere")
+                
+                if len(indices) < point_threshold:
+                    start_y = test_point[1]
+                    in_void = True
+                    self.logger.info(f"Found void at y={start_y}")
+                    break
+            
+            # If still not in void, try with different x offsets
+            if not in_void:
+                self.logger.info("Trying different x offsets...")
+                x_offsets = [-25, -20, -15, -10, 10, 15, 20, 25]
+                
+                for x_offset in x_offsets:
+                    test_x = aligned_center[0] + x_offset
+                    for y_offset in y_offsets:
+                        test_point = np.array([test_x, start_y + y_offset, test_z])
+                        indices = tree.query_ball_point(test_point, sphere_radius)
+                        
+                        if len(indices) < point_threshold:
+                            start_y = test_point[1]
+                            test_x = test_point[0]
+                            in_void = True
+                            self.logger.info(f"Found void at x={test_x}, y={start_y}")
+                            break
+                    
+                    if in_void:
+                        break
+        
+        if not in_void:
+            self.logger.warning("Could not find void (spinal canal), using centroid as starting point")
+            # We'll continue but results may not be optimal
+        
+        # Reset test point with the found void location
+        test_point = np.array([test_x, start_y, test_z])
+        
+        # Now we should be in the void or close to it, move anteriorly until hitting the vertebra
+        anterior_edge = start_y
+        anterior_found = False
+        
+        # Create debug markers for the search process
+        if hasattr(slicer, 'mrmlScene'):
+            debug_fiducials = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "PedicleVoidPoints")
+            debug_fiducials.CreateDefaultDisplayNodes()
+            debug_fiducials.GetDisplayNode().SetSelectedColor(0.0, 1.0, 0.0)  # Green
+            
+            # Add starting void point
+            debug_fiducials.AddFiducial(test_point[0], test_point[1], test_point[2])
+            debug_fiducials.SetNthFiducialLabel(0, "Start Void")
+        
+        self.logger.info(f"Starting anterior search from y={anterior_edge}")
+        max_y = start_y + search_range
+        min_y = start_y - search_range
+        
+        # Search anteriorly (increasing y)
+        current_point = np.array(test_point)
+        for i in range(int(search_range / step_size)):
+            current_point[1] += step_size
+            
+            # Check if we're beyond bounds
+            if current_point[1] > max_y:
+                self.logger.warning(f"Reached maximum y ({max_y}) without finding anterior edge")
+                break
+                
+            # Check if we hit the vertebra
+            indices = tree.query_ball_point(current_point, sphere_radius)
+            num_points = len(indices)
+            
+            self.logger.debug(f"Anterior search at y={current_point[1]}, found {num_points} points")
+            
+            if num_points >= point_threshold:
+                anterior_edge = current_point[1]
+                anterior_found = True
+                self.logger.info(f"Hit anterior edge at y={anterior_edge}")
+                
+                # Add debug marker
+                if hasattr(slicer, 'mrmlScene') and 'debug_fiducials' in locals():
+                    idx = debug_fiducials.AddFiducial(current_point[0], current_point[1], current_point[2])
+                    debug_fiducials.SetNthFiducialLabel(idx, "Anterior Edge")
+                
+                break
+        
+        # If we didn't find the anterior edge, use a default
+        if not anterior_found:
+            anterior_edge = np.percentile(side_points[:, 1], 75)  # Use 75th percentile as fallback
+            self.logger.warning(f"Using default anterior edge at y={anterior_edge}")
+        
+        # Move posteriorly until hitting the vertebra
+        posterior_edge = start_y
+        posterior_found = False
+        
+        self.logger.info(f"Starting posterior search from y={posterior_edge}")
+        
+        # Reset current point for posterior search
+        current_point = np.array(test_point)
+        for i in range(int(search_range / step_size)):
+            current_point[1] -= step_size
+            
+            # Check if we're beyond bounds
+            if current_point[1] < min_y:
+                self.logger.warning(f"Reached minimum y ({min_y}) without finding posterior edge")
+                break
+                
+            # Check if we hit the vertebra
+            indices = tree.query_ball_point(current_point, sphere_radius)
+            num_points = len(indices)
+            
+            self.logger.debug(f"Posterior search at y={current_point[1]}, found {num_points} points")
+            
+            if num_points >= point_threshold:
+                posterior_edge = current_point[1]
+                posterior_found = True
+                self.logger.info(f"Hit posterior edge at y={posterior_edge}")
+                
+                # Add debug marker
+                if hasattr(slicer, 'mrmlScene') and 'debug_fiducials' in locals():
+                    idx = debug_fiducials.AddFiducial(current_point[0], current_point[1], current_point[2])
+                    debug_fiducials.SetNthFiducialLabel(idx, "Posterior Edge")
+                
+                break
+        
+        # If we didn't find the posterior edge, use a default
+        if not posterior_found:
+            posterior_edge = np.percentile(side_points[:, 1], 25)  # Use 25th percentile as fallback
+            self.logger.warning(f"Using default posterior edge at y={posterior_edge}")
+        
+        # Check if the anterior and posterior edges make sense
+        if posterior_edge >= anterior_edge:
+            self.logger.warning("Invalid pedicle edges detected, using statistical bounds")
+            posterior_edge = np.percentile(side_points[:, 1], 25)
+            anterior_edge = np.percentile(side_points[:, 1], 75)
+            self.logger.info(f"Using statistical bounds: posterior={posterior_edge}, anterior={anterior_edge}")
+        
+        # Now search for smallest cross-section within the range
+        min_area = float('inf')
+        min_slice_idx = -1
+        min_slice_points = None
+        
+        # Define slice thickness
+        slice_thickness = 2.0  # mm
+        
+        # Search for the smallest cross-section
+        self.logger.info(f"Searching for smallest cross-section between y={posterior_edge} and y={anterior_edge}")
+        
+        for y_idx in np.arange(posterior_edge, anterior_edge, slice_thickness):
+            # Find points in this slice
+            slice_mask = (np.abs(side_points[:, 1] - y_idx) < slice_thickness/2)
+            slice_points = side_points[slice_mask]
+            
+            # Calculate slice area (number of points as proxy for area)
+            slice_area = len(slice_points)
+            
+            # Skip empty slices
+            if slice_area == 0:
+                continue
+            
+            # If we have points and area is smaller than current minimum
+            if slice_area < min_area:
+                min_area = slice_area
+                min_slice_idx = y_idx
+                min_slice_points = slice_points
+                self.logger.debug(f"New minimum at y={y_idx}, area={slice_area}")
+        
+        if min_slice_points is None or len(min_slice_points) == 0:
+            self.logger.warning("No minimum slice found within pedicle boundaries")
+            return 0, None, float('inf')
+        
+        self.logger.info(f"Found smallest cross-section at y={min_slice_idx} with area={min_area}")
+        
+        # Add marker for the smallest slice position
+        if hasattr(slicer, 'mrmlScene') and 'debug_fiducials' in locals():
+            idx = debug_fiducials.AddFiducial(test_x, min_slice_idx, test_z)
+            debug_fiducials.SetNthFiducialLabel(idx, "Smallest Slice")
+        
+        return min_slice_idx, min_slice_points, min_area
+    
+    def compute_pedicle_center_and_border(self, min_slice_points, aligned_surface_cloud, min_slice_idx, slice_thickness=2.0):
+        """
+        Compute the center of the pedicle and the pedicle border from the smallest cross-section.
+        
+        Parameters:
+            min_slice_points: Numpy array of points in the smallest cross-section
+            aligned_surface_cloud: vtkPolyData of the aligned surface point cloud
+            min_slice_idx: Y-index of the smallest cross-section
+            slice_thickness: Thickness of the slice to consider (mm)
+            
+        Returns:
+            tuple: (pedicle_center, pedicle_border_points) - Center point and border points of pedicle
+        """
+        import numpy as np
+        
+        # If we don't have any points, return default values
+        if min_slice_points is None or len(min_slice_points) == 0:
+            self.logger.warning("No points in smallest cross-section")
+            return np.zeros(3), None
+        
+        # Compute the center of the smallest cross-section
+        pedicle_center = np.mean(min_slice_points, axis=0)
+        
+        # Extract the pedicle border from the surface cloud
+        pedicle_border_points = None
+        if aligned_surface_cloud and aligned_surface_cloud.GetNumberOfPoints() > 0:
+            surface_points = self._points_to_numpy(aligned_surface_cloud.GetPoints())
+            
+            # Find surface points near the slice
+            border_mask = np.abs(surface_points[:, 1] - min_slice_idx) < slice_thickness/2
+            pedicle_border_points = surface_points[border_mask]
+        
+        return pedicle_center, pedicle_border_points
+    
+    def detect_pedicle_center_and_border(self, target_level=None):
+        """
+        Detect the pedicle center and border using the smallest cross-section approach.
+        
+        Parameters:
+            target_level: Target vertebra level (e.g., 'L4', 'L5')
+            
+        Returns:
+            tuple: (pedicle_center, pedicle_border, pca_vectors) in original space
+        """
+        import numpy as np
+        
+        # Step 1: Extract volume and surface point clouds
+        volume_cloud, surface_cloud, level_mask = self.extract_volume_and_surface_clouds(target_level)
+        
+        # Step 2-3: Apply PCA and align point clouds
+        aligned_volume_cloud, aligned_surface_cloud, rotation_matrix, center_of_mass, aligned_center, pca_vectors = \
+            self.align_point_cloud_with_pca(volume_cloud, surface_cloud, level_mask)
+        
+        # Step 4: Find smallest cross-section
+        # Transform insertion point for side determination
+        min_slice_idx, min_slice_points, min_area = self.find_smallest_pedicle_cross_section(
+            aligned_volume_cloud, aligned_surface_cloud, aligned_center, 
+            center_of_mass, rotation_matrix, self.insertion_point[0])
+        
+        # Step 5-6: Find pedicle center and border
+        aligned_pedicle_center, aligned_pedicle_border = self.compute_pedicle_center_and_border(
+            min_slice_points, aligned_surface_cloud, min_slice_idx)
+        
+        # Step 7: Transform back to original space
+        pedicle_center = self.transform_to_original_space(
+            aligned_pedicle_center, center_of_mass, rotation_matrix)
+        
+        pedicle_border = self.transform_to_original_space(
+            aligned_pedicle_border, center_of_mass, rotation_matrix)
+        
+        # Create vtk polydata for pedicle border
+        pedicle_border_cloud = self._numpy_to_vtk_polydata(pedicle_border) if pedicle_border is not None else None
+        
+        # Visualize the results if in Slicer environment
+        if hasattr(slicer, 'mrmlScene'):
+            # Visualize the smallest cross-section
+            if min_slice_points is not None and len(min_slice_points) > 0:
+                cross_section_cloud = self._numpy_to_vtk_polydata(min_slice_points)
+                cross_section_model = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", f"SmallestCrossSection_{target_level}")
+                cross_section_model.SetAndObservePolyData(cross_section_cloud)
+                cross_section_model.CreateDefaultDisplayNodes()
+                if cross_section_model.GetDisplayNode():
+                    cross_section_model.GetDisplayNode().SetColor(1.0, 0.0, 1.0)  # Magenta
+                    
+            # Visualize the pedicle border
+            if pedicle_border_cloud and pedicle_border_cloud.GetNumberOfPoints() > 0:
+                border_model = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", f"PedicleBorder_{target_level}")
+                border_model.SetAndObservePolyData(pedicle_border_cloud)
+                border_model.CreateDefaultDisplayNodes()
+                if border_model.GetDisplayNode():
+                    border_model.GetDisplayNode().SetColor(0.0, 1.0, 1.0)  # Cyan
+                    
+            # Add fiducial for pedicle center
+            fiducial_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", f"PedicleCenter_{target_level}")
+            fiducial_node.AddFiducial(*pedicle_center)
+            fiducial_node.SetNthFiducialLabel(0, "Pedicle Center")
+            fiducial_node.CreateDefaultDisplayNodes()
+            if fiducial_node.GetDisplayNode():
+                fiducial_node.GetDisplayNode().SetSelectedColor(1.0, 0.5, 0.0)  # Orange
+        
+        return pedicle_center, pedicle_border_cloud, pca_vectors
+
 def visualize_critical_points(vertebra):
     """
     Create visual markers for important points used in trajectory planning.
