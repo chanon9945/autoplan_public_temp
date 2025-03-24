@@ -1134,8 +1134,8 @@ class ScrewStep(PedicleScrewSimulatorStep):
             progressDialog.setLabelText("Processing vertebra geometry...")
             slicer.app.processEvents()
             
-            from .Vertebra import Vertebra, visualize_critical_points
-            from .CostFunctions import visualize_trajectory, visualize_search_result
+            from .Vertebra import Vertebra
+            from .CostFunctions import visualize_search_result
             
             insertion_coords = [0, 0, 0]
             self.fidNode.GetNthControlPointPosition(self.currentFidIndex, insertion_coords)
@@ -1145,9 +1145,6 @@ class ScrewStep(PedicleScrewSimulatorStep):
                 vertebra = Vertebra(labelmapNode, inputVolume, insertion_coords, target_level)
                 progressDialog.setValue(30)
                 slicer.app.processEvents()
-
-                # Visualize critical points
-                debug_fiducials = visualize_critical_points(vertebra)
                 
                 # Initialize auto planner if not already done
                 progressDialog.setLabelText("Initializing trajectory planner...")
