@@ -1589,7 +1589,7 @@ class Vertebra:
         # Parameters for edge detection - these might need tuning
         sphere_radius = 1.0      # Search radius in mm
         point_threshold = 1      # Minimum points to consider as "edge"
-        step_size = 0.1          # Step size for movement in mm
+        step_size = 0.1            # Step size for movement in mm
         search_range = 40.0      # Maximum distance to search for edges
         
         # 4. Create a test point at the center, looking for the spinal canal
@@ -1610,8 +1610,9 @@ class Vertebra:
             self.logger.info("Starting point is not in the void, searching for the spinal canal...")
             
             # Try different y positions to find the void
-            y_offsets = list(range(-30, 31, 5))  # Try ±30mm in 5mm steps
+            y_offsets = list(range(-30, 31, 1))  # Try ±30mm in 5mm steps
             
+            candidate_points = []
             for y_offset in y_offsets:
                 test_point[1] = start_y + y_offset
                 indices = full_tree.query_ball_point(test_point, sphere_radius)
@@ -1619,10 +1620,20 @@ class Vertebra:
                 self.logger.info(f"Testing y={test_point[1]}, found {len(indices)} points in sphere")
                 
                 if len(indices) < point_threshold:
-                    start_y = test_point[1]
                     in_void = True
                     self.logger.info(f"Found void at y={start_y}")
-                    break
+                    candidate_points.append(test_point[1])
+            self.logger.info(f"Found {len(candidate_points)} points")
+
+            # Search for the starting point that is closest to the aligned centroid
+            min_so_far = candidate_points[0]
+            for points in candidate_points:
+                if np.abs(aligned_center[1] - points) < np.abs(aligned_center[1] - min_so_far):
+                    min_so_far = points
+                    self.logger.info(f"Minimum so far is at y={min_so_far} and the original points is y={aligned_center[1]}")
+            
+            start_y = min_so_far
+            self.logger.info(f"Closest point is at y={min_so_far} and the original points is y={aligned_center[1]}")
             
             # If still not in void, try with different x offsets (on both sides)
             if not in_void:
@@ -1960,6 +1971,9 @@ class Vertebra:
             self.best_aligned_pca_idx = best_idx
             self.pca_alignment_score = best_score
             
+            # VISUALIZATION: Create visualization of aligned vertebra
+            self._visualize_aligned_vertebra(aligned_volume_cloud, aligned_surface_cloud, aligned_center, pca_vectors)
+            
             # Step 4: Find smallest cross-section without pre-filtering by side
             self.logger.info("Finding smallest cross-section...")
             min_slice_idx, min_slice_points, min_area = self.find_smallest_pedicle_cross_section(
@@ -2032,3 +2046,97 @@ class Vertebra:
             
             # Return defaults on error
             return self.insertion_point, None, np.eye(3)
+
+    def _visualize_aligned_vertebra(self, aligned_volume_cloud, aligned_surface_cloud, aligned_center, pca_vectors):
+        """
+        Visualize the aligned vertebra for debugging.
+        
+        Parameters:
+            aligned_volume_cloud: vtkPolyData of the aligned volume point cloud
+            aligned_surface_cloud: vtkPolyData of the aligned surface point cloud
+            aligned_center: 3D coordinate of the aligned center point
+            pca_vectors: Principal component vectors
+        """
+        import slicer
+        import vtk
+        import numpy as np
+        
+        # Only proceed if in Slicer environment
+        if not hasattr(slicer, 'mrmlScene'):
+            return
+        
+        # Remove any existing visualization nodes
+        for name in ["AlignedVolume", "AlignedSurface", "AlignedCenterPoint", 
+                    "AlignedAxis1", "AlignedAxis2", "AlignedAxis3"]:
+            existing_node = slicer.mrmlScene.GetFirstNodeByName(name)
+            if existing_node:
+                slicer.mrmlScene.RemoveNode(existing_node)
+        
+        # Create a model for the aligned volume point cloud
+        if aligned_volume_cloud and aligned_volume_cloud.GetNumberOfPoints() > 0:
+            volume_model = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "AlignedVolume")
+            volume_model.SetAndObservePolyData(aligned_volume_cloud)
+            volume_model.CreateDefaultDisplayNodes()
+            if volume_model.GetDisplayNode():
+                volume_model.GetDisplayNode().SetColor(0.7, 0.7, 0.9)  # Light blue
+                volume_model.GetDisplayNode().SetOpacity(0.5)
+                volume_model.GetDisplayNode().SetVisibility(0)  # Initially hidden
+        
+        # Create a model for the aligned surface point cloud
+        if aligned_surface_cloud and aligned_surface_cloud.GetNumberOfPoints() > 0:
+            surface_model = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "AlignedSurface")
+            surface_model.SetAndObservePolyData(aligned_surface_cloud)
+            surface_model.CreateDefaultDisplayNodes()
+            if surface_model.GetDisplayNode():
+                surface_model.GetDisplayNode().SetColor(0.9, 0.7, 0.7)  # Light red
+                surface_model.GetDisplayNode().SetOpacity(0.8)
+                surface_model.GetDisplayNode().SetVisibility(0)  # Initially hidden
+        
+        # Create a fiducial for the aligned center
+        center_fiducial = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "AlignedCenterPoint")
+        center_fiducial.AddFiducial(*aligned_center)
+        center_fiducial.SetNthFiducialLabel(0, "Aligned Center")
+        center_fiducial.CreateDefaultDisplayNodes()
+        if center_fiducial.GetDisplayNode():
+            center_fiducial.GetDisplayNode().SetSelectedColor(0.0, 1.0, 0.0)  # Green
+            center_fiducial.GetDisplayNode().SetGlyphScale(5.0)
+            center_fiducial.GetDisplayNode().SetVisibility(0)  # Initially hidden
+        
+        # Create visualization of PCA axes
+        axis_colors = [
+            (1.0, 0.0, 0.0),  # Red for first PC
+            (0.0, 1.0, 0.0),  # Green for second PC
+            (0.0, 0.0, 1.0)   # Blue for third PC
+        ]
+        
+        axis_scale = 30.0  # Length of the axes
+        
+        for i in range(3):
+            if pca_vectors.shape[1] <= i:
+                continue
+                
+            vector = pca_vectors[:, i]
+            norm = np.linalg.norm(vector)
+            
+            if norm < 1e-6:
+                continue
+                
+            # Normalize and scale
+            vector = vector / norm * axis_scale
+            
+            # Create line source for axis
+            line_source = vtk.vtkLineSource()
+            line_source.SetPoint1(aligned_center)
+            line_source.SetPoint2(aligned_center + vector)
+            line_source.Update()
+            
+            # Create model node
+            axis_model = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", f"AlignedAxis{i+1}")
+            axis_model.SetAndObservePolyData(line_source.GetOutput())
+            axis_model.CreateDefaultDisplayNodes()
+            
+            # Set display properties
+            if axis_model.GetDisplayNode():
+                axis_model.GetDisplayNode().SetColor(*axis_colors[i])
+                axis_model.GetDisplayNode().SetLineWidth(3.0)
+                axis_model.GetDisplayNode().SetVisibility(0)  # Initially hidden
