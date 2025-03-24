@@ -2764,6 +2764,7 @@ class Vertebra:
     def find_smallest_pedicle_cross_section(self, aligned_volume_cloud, aligned_surface_cloud, aligned_center, center_of_mass, rotation_matrix, insertion_x):
         """
         Find the smallest cross-section of the pedicle by moving through the spinal canal.
+        Modified to search primarily in the Y direction to find more accurate canal edges.
         
         Parameters:
             aligned_volume_cloud: vtkPolyData of the aligned volume point cloud
@@ -2795,6 +2796,7 @@ class Vertebra:
         side_text = "left" if is_left_side else "right"
         self.logger.info(f"Working on {side_text} side based on insertion point at {insertion_point_aligned}")
         
+        # Filter points based on side
         side_filter = volume_points[:, 0] < aligned_center[0] if is_left_side else volume_points[:, 0] > aligned_center[0]
         side_points = volume_points[side_filter]
         
@@ -2811,165 +2813,274 @@ class Vertebra:
         step_size = 1.0          # Step size for movement in mm
         search_range = 40.0      # Maximum distance to search for edges
         
-        # Create a test point at the side of interest, offset from center
-        # We'll start in the expected region of the spinal canal
-        test_x = aligned_center[0] - 15.0 if is_left_side else aligned_center[0] + 15.0
-        start_y = aligned_center[1]
-        test_z = aligned_center[2]
+        # Calculate the X position for the side of interest
+        # Make sure we're far enough from the centerline to be in the pedicle region
+        side_offset = 15.0  # mm - this is the distance from midline to ensure we're in the pedicle region
+        test_x = aligned_center[0] - side_offset if is_left_side else aligned_center[0] + side_offset
         
-        # Try to find a point in the void by sampling around the aligned center
-        test_point = np.array([test_x, start_y, test_z])
-        self.logger.info(f"Starting test point: {test_point}")
-        
-        # Check if starting point is in the void (spinal canal)
-        indices = tree.query_ball_point(test_point, sphere_radius)
-        in_void = len(indices) < point_threshold
-        
-        # If not in void, search for the void
-        if not in_void:
-            self.logger.info("Starting point is not in the void, searching for the spinal canal...")
-            
-            # Try different y positions to find the void
-            y_offsets = list(range(-30, 31, 5))  # Try ±30mm in 5mm steps
-            
-            for y_offset in y_offsets:
-                test_point[1] = start_y + y_offset
-                indices = tree.query_ball_point(test_point, sphere_radius)
-                
-                self.logger.info(f"Testing y={test_point[1]}, found {len(indices)} points in sphere")
-                
-                if len(indices) < point_threshold:
-                    start_y = test_point[1]
-                    in_void = True
-                    self.logger.info(f"Found void at y={start_y}")
-                    break
-            
-            # If still not in void, try with different x offsets
-            if not in_void:
-                self.logger.info("Trying different x offsets...")
-                x_offsets = [-25, -20, -15, -10, 10, 15, 20, 25]
-                
-                for x_offset in x_offsets:
-                    test_x = aligned_center[0] + x_offset
-                    for y_offset in y_offsets:
-                        test_point = np.array([test_x, start_y + y_offset, test_z])
-                        indices = tree.query_ball_point(test_point, sphere_radius)
-                        
-                        if len(indices) < point_threshold:
-                            start_y = test_point[1]
-                            test_x = test_point[0]
-                            in_void = True
-                            self.logger.info(f"Found void at x={test_x}, y={start_y}")
-                            break
-                    
-                    if in_void:
-                        break
-        
-        if not in_void:
-            self.logger.warning("Could not find void (spinal canal), using centroid as starting point")
-            # We'll continue but results may not be optimal
-        
-        # Reset test point with the found void location
-        test_point = np.array([test_x, start_y, test_z])
-        
-        # Now we should be in the void or close to it, move anteriorly until hitting the vertebra
-        anterior_edge = start_y
-        anterior_found = False
+        # Get range of Y values to search for the canal
+        y_range = np.percentile(side_points[:, 1], [20, 80])  # Use 20th-80th percentile as search range
+        y_min, y_max = y_range[0] - 10, y_range[1] + 10  # Add margin
         
         # Create debug markers for the search process
         if hasattr(slicer, 'mrmlScene'):
             debug_fiducials = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "PedicleVoidPoints")
             debug_fiducials.CreateDefaultDisplayNodes()
             debug_fiducials.GetDisplayNode().SetSelectedColor(0.0, 1.0, 0.0)  # Green
-            
-            # Add starting void point
-            debug_fiducials.AddFiducial(test_point[0], test_point[1], test_point[2])
-            debug_fiducials.SetNthFiducialLabel(0, "Start Void")
         
-        self.logger.info(f"Starting anterior search from y={anterior_edge}")
-        max_y = start_y + search_range
-        min_y = start_y - search_range
+        # Find a void point by searching systematically in the Y direction
+        void_y = None
+        test_z = aligned_center[2]  # Use Z coordinate of the centroid
         
-        # Search anteriorly (increasing y)
-        current_point = np.array(test_point)
-        for i in range(int(search_range / step_size)):
-            current_point[1] += step_size
+        # Create a grid of Y positions to search
+        y_steps = np.arange(y_min, y_max, 5.0)  # 5mm steps for initial search
+        
+        # Search for a void point - only vary Y, keep X fixed
+        for y_pos in y_steps:
+            test_point = np.array([test_x, y_pos, test_z])
+            indices = tree.query_ball_point(test_point, sphere_radius)
             
-            # Check if we're beyond bounds
-            if current_point[1] > max_y:
-                self.logger.warning(f"Reached maximum y ({max_y}) without finding anterior edge")
-                break
+            self.logger.debug(f"Testing y={y_pos}, found {len(indices)} points in sphere")
+            
+            # If we have few enough points, we might be in the void
+            if len(indices) < point_threshold:
+                void_y = y_pos
+                self.logger.info(f"Found potential void at y={void_y}")
                 
-            # Check if we hit the vertebra
-            indices = tree.query_ball_point(current_point, sphere_radius)
-            num_points = len(indices)
-            
-            self.logger.debug(f"Anterior search at y={current_point[1]}, found {num_points} points")
-            
-            if num_points >= point_threshold:
-                anterior_edge = current_point[1]
-                anterior_found = True
-                self.logger.info(f"Hit anterior edge at y={anterior_edge}")
-                
-                # Add debug marker
+                # Add debug marker for potential void point
                 if hasattr(slicer, 'mrmlScene') and 'debug_fiducials' in locals():
-                    idx = debug_fiducials.AddFiducial(current_point[0], current_point[1], current_point[2])
-                    debug_fiducials.SetNthFiducialLabel(idx, "Anterior Edge")
+                    idx = debug_fiducials.AddFiducial(test_x, void_y, test_z)
+                    debug_fiducials.SetNthFiducialLabel(idx, "Potential Void")
                 
-                break
+                # Verify this is truly a void by checking nearby points
+                # Ensure we're truly in a void, not just in a small gap
+                is_true_void = True
+                for check_offset in [-5, 0, 5]:
+                    check_point = np.array([test_x, void_y + check_offset, test_z])
+                    check_indices = tree.query_ball_point(check_point, sphere_radius)
+                    if len(check_indices) >= point_threshold:
+                        is_true_void = False
+                        break
+                
+                if is_true_void:
+                    self.logger.info(f"Confirmed void at y={void_y}")
+                    # Add debug marker for confirmed void
+                    if hasattr(slicer, 'mrmlScene') and 'debug_fiducials' in locals():
+                        idx = debug_fiducials.AddFiducial(test_x, void_y, test_z)
+                        debug_fiducials.SetNthFiducialLabel(idx, "Confirmed Void")
+                    break
+                else:
+                    void_y = None  # Reset if this isn't a true void
         
-        # If we didn't find the anterior edge, use a default
-        if not anterior_found:
-            anterior_edge = np.percentile(side_points[:, 1], 75)  # Use 75th percentile as fallback
-            self.logger.warning(f"Using default anterior edge at y={anterior_edge}")
+        # If we couldn't find a void point with the initial search, try a more thorough search
+        if void_y is None:
+            self.logger.info("Initial void search failed, trying more thorough search...")
+            
+            # Try different X offsets, but only if necessary
+            # We want to stay on the correct side of the vertebra
+            x_range = [test_x - 5, test_x, test_x + 5] if is_left_side else [test_x + 5, test_x, test_x - 5]
+            
+            # Constrain X range to stay on the correct side
+            if is_left_side:
+                x_range = [x for x in x_range if x < aligned_center[0]]
+            else:
+                x_range = [x for x in x_range if x > aligned_center[0]]
+            
+            # Try a finer Y grid
+            y_steps = np.arange(y_min, y_max, 2.0)  # 2mm steps for more thorough search
+            
+            for x_pos in x_range:
+                for y_pos in y_steps:
+                    test_point = np.array([x_pos, y_pos, test_z])
+                    indices = tree.query_ball_point(test_point, sphere_radius)
+                    
+                    if len(indices) < point_threshold:
+                        # Verify this is truly a void by checking nearby points
+                        is_true_void = True
+                        for check_offset in [-3, 0, 3]:
+                            check_point = np.array([x_pos, y_pos + check_offset, test_z])
+                            check_indices = tree.query_ball_point(check_point, sphere_radius)
+                            if len(check_indices) >= point_threshold:
+                                is_true_void = False
+                                break
+                        
+                        if is_true_void:
+                            void_y = y_pos
+                            test_x = x_pos  # Update test_x to the working position
+                            self.logger.info(f"Found void in thorough search at x={test_x}, y={void_y}")
+                            
+                            # Add debug marker
+                            if hasattr(slicer, 'mrmlScene') and 'debug_fiducials' in locals():
+                                idx = debug_fiducials.AddFiducial(test_x, void_y, test_z)
+                                debug_fiducials.SetNthFiducialLabel(idx, "Thorough Search Void")
+                            break
+                
+                if void_y is not None:
+                    break
         
-        # Move posteriorly until hitting the vertebra
-        posterior_edge = start_y
+        # If we still couldn't find a void, try a statistical approach
+        if void_y is None:
+            self.logger.warning("Could not find void point, using statistical approach")
+            
+            # Use statistics to estimate where the canal should be
+            # The spinal canal is typically around the middle of the y-range
+            y_percentiles = np.percentile(side_points[:, 1], [25, 40, 50, 60, 75])
+            
+            # Try several potential Y positions based on percentiles
+            for y_pos in y_percentiles:
+                test_point = np.array([test_x, y_pos, test_z])
+                indices = tree.query_ball_point(test_point, sphere_radius * 1.5)  # Use larger radius
+                
+                if len(indices) < point_threshold * 2:  # More lenient threshold
+                    void_y = y_pos
+                    self.logger.info(f"Using statistical void at y={void_y}")
+                    
+                    # Add debug marker
+                    if hasattr(slicer, 'mrmlScene') and 'debug_fiducials' in locals():
+                        idx = debug_fiducials.AddFiducial(test_x, void_y, test_z)
+                        debug_fiducials.SetNthFiducialLabel(idx, "Statistical Void")
+                    break
+        
+        # If we still couldn't find a void, use vertebra center Y as fallback
+        if void_y is None:
+            void_y = aligned_center[1]  # Use centroid Y
+            self.logger.warning(f"Using centroid Y={void_y} as fallback")
+            
+            # Add debug marker
+            if hasattr(slicer, 'mrmlScene') and 'debug_fiducials' in locals():
+                idx = debug_fiducials.AddFiducial(test_x, void_y, test_z)
+                debug_fiducials.SetNthFiducialLabel(idx, "Fallback Void")
+        
+        # Now search for the posterior edge (decreasing Y)
+        posterior_edge = void_y
         posterior_found = False
+        
+        current_point = np.array([test_x, void_y, test_z])
+        
+        # Add marker for starting void point
+        if hasattr(slicer, 'mrmlScene') and 'debug_fiducials' in locals():
+            idx = debug_fiducials.AddFiducial(current_point[0], current_point[1], current_point[2])
+            debug_fiducials.SetNthFiducialLabel(idx, "Search Start")
         
         self.logger.info(f"Starting posterior search from y={posterior_edge}")
         
-        # Reset current point for posterior search
-        current_point = np.array(test_point)
-        for i in range(int(search_range / step_size)):
-            current_point[1] -= step_size
+        # Set search bounds
+        min_y = max(y_min, void_y - search_range)
+        
+        # Search posteriorly (decreasing Y) - use smaller step size for accuracy
+        for i in range(int(search_range / (step_size/2))):
+            current_point[1] -= step_size/2
             
             # Check if we're beyond bounds
             if current_point[1] < min_y:
                 self.logger.warning(f"Reached minimum y ({min_y}) without finding posterior edge")
                 break
-                
+            
             # Check if we hit the vertebra
             indices = tree.query_ball_point(current_point, sphere_radius)
             num_points = len(indices)
             
-            self.logger.debug(f"Posterior search at y={current_point[1]}, found {num_points} points")
+            # Log every few steps to reduce noise
+            if i % 5 == 0:
+                self.logger.debug(f"Posterior search at y={current_point[1]}, found {num_points} points")
             
             if num_points >= point_threshold:
-                posterior_edge = current_point[1]
-                posterior_found = True
-                self.logger.info(f"Hit posterior edge at y={posterior_edge}")
+                # Verify with additional checks to avoid false edges
+                # Check a few nearby points to confirm we've truly hit an edge
+                edge_confirmed = True
+                for check_offset in [-1, 0, 1]:
+                    check_x = current_point[0] + check_offset
+                    check_point = np.array([check_x, current_point[1], current_point[2]])
+                    check_indices = tree.query_ball_point(check_point, sphere_radius)
+                    if len(check_indices) < point_threshold:
+                        edge_confirmed = False
+                        break
                 
-                # Add debug marker
-                if hasattr(slicer, 'mrmlScene') and 'debug_fiducials' in locals():
-                    idx = debug_fiducials.AddFiducial(current_point[0], current_point[1], current_point[2])
-                    debug_fiducials.SetNthFiducialLabel(idx, "Posterior Edge")
-                
+                if edge_confirmed:
+                    posterior_edge = current_point[1]
+                    posterior_found = True
+                    self.logger.info(f"Hit posterior edge at y={posterior_edge}")
+                    
+                    # Add debug marker
+                    if hasattr(slicer, 'mrmlScene') and 'debug_fiducials' in locals():
+                        idx = debug_fiducials.AddFiducial(current_point[0], current_point[1], current_point[2])
+                        debug_fiducials.SetNthFiducialLabel(idx, "Posterior Edge")
+                    
+                    break
+        
+        # Now search for the anterior edge (increasing Y)
+        anterior_edge = void_y
+        anterior_found = False
+        
+        # Reset current point to start search from void
+        current_point = np.array([test_x, void_y, test_z])
+        self.logger.info(f"Starting anterior search from y={anterior_edge}")
+        
+        # Set search bounds
+        max_y = min(y_max, void_y + search_range)
+        
+        # Search anteriorly (increasing Y) - use smaller step size for accuracy
+        for i in range(int(search_range / (step_size/2))):
+            current_point[1] += step_size/2
+            
+            # Check if we're beyond bounds
+            if current_point[1] > max_y:
+                self.logger.warning(f"Reached maximum y ({max_y}) without finding anterior edge")
                 break
+            
+            # Check if we hit the vertebra
+            indices = tree.query_ball_point(current_point, sphere_radius)
+            num_points = len(indices)
+            
+            # Log every few steps to reduce noise
+            if i % 5 == 0:
+                self.logger.debug(f"Anterior search at y={current_point[1]}, found {num_points} points")
+            
+            if num_points >= point_threshold:
+                # Verify with additional checks to avoid false edges
+                edge_confirmed = True
+                for check_offset in [-1, 0, 1]:
+                    check_x = current_point[0] + check_offset
+                    check_point = np.array([check_x, current_point[1], current_point[2]])
+                    check_indices = tree.query_ball_point(check_point, sphere_radius)
+                    if len(check_indices) < point_threshold:
+                        edge_confirmed = False
+                        break
+                
+                if edge_confirmed:
+                    anterior_edge = current_point[1]
+                    anterior_found = True
+                    self.logger.info(f"Hit anterior edge at y={anterior_edge}")
+                    
+                    # Add debug marker
+                    if hasattr(slicer, 'mrmlScene') and 'debug_fiducials' in locals():
+                        idx = debug_fiducials.AddFiducial(current_point[0], current_point[1], current_point[2])
+                        debug_fiducials.SetNthFiducialLabel(idx, "Anterior Edge")
+                    
+                    break
         
-        # If we didn't find the posterior edge, use a default
+        # If we couldn't find the edges, use statistical approach
         if not posterior_found:
-            posterior_edge = np.percentile(side_points[:, 1], 25)  # Use 25th percentile as fallback
-            self.logger.warning(f"Using default posterior edge at y={posterior_edge}")
+            posterior_edge = np.percentile(side_points[:, 1], 25)  # Use 25th percentile as posterior edge
+            self.logger.warning(f"Using statistical posterior edge at y={posterior_edge}")
         
-        # Check if the anterior and posterior edges make sense
+        if not anterior_found:
+            anterior_edge = np.percentile(side_points[:, 1], 75)  # Use 75th percentile as anterior edge
+            self.logger.warning(f"Using statistical anterior edge at y={anterior_edge}")
+        
+        # Verify edges are valid (posterior should be less than anterior)
         if posterior_edge >= anterior_edge:
-            self.logger.warning("Invalid pedicle edges detected, using statistical bounds")
-            posterior_edge = np.percentile(side_points[:, 1], 25)
-            anterior_edge = np.percentile(side_points[:, 1], 75)
-            self.logger.info(f"Using statistical bounds: posterior={posterior_edge}, anterior={anterior_edge}")
+            self.logger.warning("Invalid canal detection, posterior edge is anterior to anterior edge")
+            # Swap if necessary
+            if posterior_edge > anterior_edge:
+                posterior_edge, anterior_edge = anterior_edge, posterior_edge
+            # Or apply a small offset if they're equal
+            elif posterior_edge == anterior_edge:
+                buffer = 5.0  # mm
+                posterior_edge -= buffer
+                anterior_edge += buffer
         
-        # Now search for smallest cross-section within the range
+        # Now search for smallest cross-section within the canal range
         min_area = float('inf')
         min_slice_idx = -1
         min_slice_points = None
@@ -2977,30 +3088,60 @@ class Vertebra:
         # Define slice thickness
         slice_thickness = 2.0  # mm
         
-        # Search for the smallest cross-section
+        # Search for the smallest cross-section using the fixed test_x (maintaining side positioning)
         self.logger.info(f"Searching for smallest cross-section between y={posterior_edge} and y={anterior_edge}")
         
-        for y_idx in np.arange(posterior_edge, anterior_edge, slice_thickness):
-            # Find points in this slice
-            slice_mask = (np.abs(side_points[:, 1] - y_idx) < slice_thickness/2)
-            slice_points = side_points[slice_mask]
+        for y_idx in np.arange(posterior_edge, anterior_edge, slice_thickness/2):  # Use smaller steps for better precision
+            # Find points in this slice (around test_x for the specific side)
+            # Use a cylinder-like approach: check around fixed X, with a slice in Y
+            cylinder_points = []
+            
+            for point in side_points:
+                # Check if point is within Y-slice
+                if abs(point[1] - y_idx) <= slice_thickness/2:
+                    # Check if it's reasonably close to our test_x
+                    if abs(point[0] - test_x) <= 15.0:  # 15mm radius in X direction
+                        cylinder_points.append(point)
             
             # Calculate slice area (number of points as proxy for area)
-            slice_area = len(slice_points)
+            slice_area = len(cylinder_points)
             
-            # Skip empty slices
-            if slice_area == 0:
+            # Skip empty slices or very small samples
+            if slice_area < 5:
                 continue
             
             # If we have points and area is smaller than current minimum
             if slice_area < min_area:
                 min_area = slice_area
                 min_slice_idx = y_idx
-                min_slice_points = slice_points
+                min_slice_points = np.array(cylinder_points)
                 self.logger.debug(f"New minimum at y={y_idx}, area={slice_area}")
         
         if min_slice_points is None or len(min_slice_points) == 0:
             self.logger.warning("No minimum slice found within pedicle boundaries")
+            
+            # Try again with a larger slice thickness as fallback
+            fallback_thickness = 4.0  # mm
+            
+            for y_idx in np.arange(posterior_edge, anterior_edge, fallback_thickness):
+                # Find points in thicker slice
+                cylinder_points = []
+                
+                for point in side_points:
+                    if abs(point[1] - y_idx) <= fallback_thickness/2:
+                        if abs(point[0] - test_x) <= 20.0:  # Wider radius too
+                            cylinder_points.append(point)
+                
+                slice_area = len(cylinder_points)
+                
+                if slice_area >= 5 and (min_area == float('inf') or slice_area < min_area):
+                    min_area = slice_area
+                    min_slice_idx = y_idx
+                    min_slice_points = np.array(cylinder_points)
+                    self.logger.debug(f"Fallback: New minimum at y={y_idx}, area={slice_area}")
+        
+        if min_slice_points is None or len(min_slice_points) == 0:
+            self.logger.error("Could not find any valid slice within pedicle")
             return 0, None, float('inf')
         
         self.logger.info(f"Found smallest cross-section at y={min_slice_idx} with area={min_area}")
