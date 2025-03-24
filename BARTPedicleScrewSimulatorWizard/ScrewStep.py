@@ -1134,7 +1134,9 @@ class ScrewStep(PedicleScrewSimulatorStep):
             progressDialog.setLabelText("Processing vertebra geometry...")
             slicer.app.processEvents()
             
-            from .Vertebra import Vertebra
+            from .Vertebra import Vertebra, visualize_critical_points
+            from .CostFunctions import visualize_trajectory, visualize_search_result
+            
             insertion_coords = [0, 0, 0]
             self.fidNode.GetNthControlPointPosition(self.currentFidIndex, insertion_coords)
             
@@ -1145,7 +1147,6 @@ class ScrewStep(PedicleScrewSimulatorStep):
                 slicer.app.processEvents()
 
                 # Visualize critical points
-                from .Vertebra import visualize_critical_points
                 debug_fiducials = visualize_critical_points(vertebra)
                 
                 # Initialize auto planner if not already done
@@ -1183,10 +1184,12 @@ class ScrewStep(PedicleScrewSimulatorStep):
                             logging.error(f"Error checking cancel status: {str(e)}")
                             return False
                     
+                    # Create auto planner with focus on distance cost
+                    # Set the weight vector with high weight on distance cost, zero on others
                     self.autoPlanner = PedicleScrewAutoPlanner(
                         resolution=200,  # Lower resolution for faster results
                         reach=100,
-                        weight=[300, 1, 30, 0.05],
+                        weight=[1.0, 0.0, 0.0, 0.0],  # Only use distance cost
                         progress_callback=progress_callback
                     )
                 else:
@@ -1217,6 +1220,9 @@ class ScrewStep(PedicleScrewSimulatorStep):
                             return False
                     
                     self.autoPlanner.progress_callback = progress_callback
+                    
+                    # Update weights to focus only on distance cost
+                    self.autoPlanner.weight = [1.0, 0.0, 0.0, 0.0]
                 
                 # Run the trajectory planning
                 progressDialog.setValue(40)
@@ -1236,17 +1242,31 @@ class ScrewStep(PedicleScrewSimulatorStep):
                 self.transformSlider1.setValue(vertical_angle)
                 self.transformSlider2.setValue(horizontal_angle)
                 
+                # Visualize the final trajectory
+                viz_nodes = visualize_search_result(
+                    vertebra,
+                    insertion_coords,
+                    final_traj,
+                    angles,
+                    cost,
+                    name_prefix="Optimal"
+                )
+                
                 progressDialog.setValue(100)
                 slicer.app.processEvents()
                 
                 # Clean up
                 slicer.mrmlScene.RemoveNode(labelmapNode)
+                
+                # Show detailed report
                 qt.QMessageBox.information(None, "Auto-Planning", 
-                                        f"Trajectory planning completed successfully.\n"
+                                        f"Trajectory planning completed successfully.\n\n"
                                         f"Vertical angle: {vertical_angle:.1f}°\n"
                                         f"Horizontal angle: {horizontal_angle:.1f}°\n"
-                                        f"Level: {target_level}\n"
-                                        f"Cost: {cost:.2f}")
+                                        f"Distance from pedicle center: {cost:.2f} mm\n"
+                                        f"Level: {target_level}\n\n"
+                                        f"The trajectory has been visualized and the angles have been set."
+                                        f"You can now adjust, insert, or save the screw using the controls.")
                 
             except Exception as e:
                 logging.error(f"Vertebra processing error: {str(e)}")
@@ -1254,7 +1274,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
                 logging.error(traceback.format_exc())
                 progressDialog.close()
                 qt.QMessageBox.critical(None, "Error", f"Vertebra processing failed: {str(e)}")
-                
+                    
         except Exception as e:
             logging.error(f"Auto-planning error: {str(e)}")
             import traceback

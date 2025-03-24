@@ -2763,7 +2763,9 @@ class Vertebra:
     
     def find_smallest_pedicle_cross_section(self, aligned_volume_cloud, aligned_surface_cloud, aligned_center, center_of_mass, rotation_matrix, insertion_x):
         """
-        Find the smallest cross-section of the pedicle by moving through the spinal canal.
+        Find the smallest cross-section of the pedicle by:
+        1. First locating the spinal canal using the full vertebra
+        2. Then finding the smallest cross-section on the side of interest
         
         Parameters:
             aligned_volume_cloud: vtkPolyData of the aligned volume point cloud
@@ -2778,15 +2780,19 @@ class Vertebra:
         """
         import numpy as np
         from scipy.spatial import cKDTree
+        import time
         
-        # Convert vtkPolyData to numpy array
+        start_time = time.time()
+        self.logger.info("Starting smallest pedicle cross-section detection")
+        
+        # 1. Convert vtkPolyData to numpy array (use ALL points)
         volume_points = self._points_to_numpy(aligned_volume_cloud.GetPoints())
         
         if volume_points.shape[0] == 0:
             self.logger.warning("Empty point cloud, cannot find smallest cross-section")
             return 0, None, float('inf')
         
-        # Transform insertion point to aligned space to determine side
+        # 2. Transform insertion point to aligned space to determine side
         insertion_point_aligned = self.transform_to_aligned_space(
             self.insertion_point, center_of_mass, rotation_matrix)
         
@@ -2795,25 +2801,17 @@ class Vertebra:
         side_text = "left" if is_left_side else "right"
         self.logger.info(f"Working on {side_text} side based on insertion point at {insertion_point_aligned}")
         
-        side_filter = volume_points[:, 0] < aligned_center[0] if is_left_side else volume_points[:, 0] > aligned_center[0]
-        side_points = volume_points[side_filter]
-        
-        if len(side_points) == 0:
-            self.logger.warning(f"No points found on the {side_text} side")
-            return 0, None, float('inf')
-        
-        # Build KD-tree for efficient nearest neighbor searches
-        tree = cKDTree(side_points)
+        # 3. Build KD-tree for the FULL point cloud (don't filter by side yet)
+        full_tree = cKDTree(volume_points)
         
         # Parameters for edge detection - these might need tuning
-        sphere_radius = 5.0      # Search radius in mm
-        point_threshold = 5      # Minimum points to consider as "edge"
-        step_size = 1.0          # Step size for movement in mm
+        sphere_radius = 1.0      # Search radius in mm
+        point_threshold = 1      # Minimum points to consider as "edge"
+        step_size = 0.1          # Step size for movement in mm
         search_range = 40.0      # Maximum distance to search for edges
         
-        # Create a test point at the side of interest, offset from center
-        # We'll start in the expected region of the spinal canal
-        test_x = aligned_center[0] - 15.0 if is_left_side else aligned_center[0] + 15.0
+        # 4. Create a test point at the center, looking for the spinal canal
+        test_x = aligned_center[0]  # Use full center, not side-specific offset
         start_y = aligned_center[1]
         test_z = aligned_center[2]
         
@@ -2821,11 +2819,11 @@ class Vertebra:
         test_point = np.array([test_x, start_y, test_z])
         self.logger.info(f"Starting test point: {test_point}")
         
-        # Check if starting point is in the void (spinal canal)
-        indices = tree.query_ball_point(test_point, sphere_radius)
+        # 5. Check if starting point is in the void (spinal canal)
+        indices = full_tree.query_ball_point(test_point, sphere_radius)
         in_void = len(indices) < point_threshold
         
-        # If not in void, search for the void
+        # If not in void, search for the void around the center area
         if not in_void:
             self.logger.info("Starting point is not in the void, searching for the spinal canal...")
             
@@ -2834,7 +2832,7 @@ class Vertebra:
             
             for y_offset in y_offsets:
                 test_point[1] = start_y + y_offset
-                indices = tree.query_ball_point(test_point, sphere_radius)
+                indices = full_tree.query_ball_point(test_point, sphere_radius)
                 
                 self.logger.info(f"Testing y={test_point[1]}, found {len(indices)} points in sphere")
                 
@@ -2844,16 +2842,16 @@ class Vertebra:
                     self.logger.info(f"Found void at y={start_y}")
                     break
             
-            # If still not in void, try with different x offsets
+            # If still not in void, try with different x offsets (on both sides)
             if not in_void:
-                self.logger.info("Trying different x offsets...")
-                x_offsets = [-25, -20, -15, -10, 10, 15, 20, 25]
+                self.logger.info("Trying different x offsets for whole vertebra search...")
+                x_offsets = [-25, -20, -15, -10, -5, 0, 5, 10, 15, 20, 25]
                 
                 for x_offset in x_offsets:
                     test_x = aligned_center[0] + x_offset
                     for y_offset in y_offsets:
                         test_point = np.array([test_x, start_y + y_offset, test_z])
-                        indices = tree.query_ball_point(test_point, sphere_radius)
+                        indices = full_tree.query_ball_point(test_point, sphere_radius)
                         
                         if len(indices) < point_threshold:
                             start_y = test_point[1]
@@ -2872,19 +2870,27 @@ class Vertebra:
         # Reset test point with the found void location
         test_point = np.array([test_x, start_y, test_z])
         
-        # Now we should be in the void or close to it, move anteriorly until hitting the vertebra
-        anterior_edge = start_y
-        anterior_found = False
-        
         # Create debug markers for the search process
         if hasattr(slicer, 'mrmlScene'):
+            # Remove existing node if it exists
+            existing_node = slicer.mrmlScene.GetFirstNodeByName("PedicleVoidPoints")
+            if existing_node:
+                slicer.mrmlScene.RemoveNode(existing_node)
+                
             debug_fiducials = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "PedicleVoidPoints")
             debug_fiducials.CreateDefaultDisplayNodes()
             debug_fiducials.GetDisplayNode().SetSelectedColor(0.0, 1.0, 0.0)  # Green
             
             # Add starting void point
-            debug_fiducials.AddFiducial(test_point[0], test_point[1], test_point[2])
-            debug_fiducials.SetNthFiducialLabel(0, "Start Void")
+            idx = debug_fiducials.AddFiducial(test_point[0], test_point[1], test_point[2])
+            debug_fiducials.SetNthFiducialLabel(idx, "Start Void")
+        
+        # 6. Now detect the anterior and posterior edges of the whole vertebra
+        self.logger.info("Detecting spinal canal edges using FULL vertebra...")
+        
+        # Now we should be in the void or close to it, move anteriorly until hitting the vertebra
+        anterior_edge = start_y
+        anterior_found = False
         
         self.logger.info(f"Starting anterior search from y={anterior_edge}")
         max_y = start_y + search_range
@@ -2901,7 +2907,7 @@ class Vertebra:
                 break
                 
             # Check if we hit the vertebra
-            indices = tree.query_ball_point(current_point, sphere_radius)
+            indices = full_tree.query_ball_point(current_point, sphere_radius)
             num_points = len(indices)
             
             self.logger.debug(f"Anterior search at y={current_point[1]}, found {num_points} points")
@@ -2920,7 +2926,7 @@ class Vertebra:
         
         # If we didn't find the anterior edge, use a default
         if not anterior_found:
-            anterior_edge = np.percentile(side_points[:, 1], 75)  # Use 75th percentile as fallback
+            anterior_edge = np.percentile(volume_points[:, 1], 75)  # Use 75th percentile as fallback
             self.logger.warning(f"Using default anterior edge at y={anterior_edge}")
         
         # Move posteriorly until hitting the vertebra
@@ -2940,7 +2946,7 @@ class Vertebra:
                 break
                 
             # Check if we hit the vertebra
-            indices = tree.query_ball_point(current_point, sphere_radius)
+            indices = full_tree.query_ball_point(current_point, sphere_radius)
             num_points = len(indices)
             
             self.logger.debug(f"Posterior search at y={current_point[1]}, found {num_points} points")
@@ -2959,17 +2965,28 @@ class Vertebra:
         
         # If we didn't find the posterior edge, use a default
         if not posterior_found:
-            posterior_edge = np.percentile(side_points[:, 1], 25)  # Use 25th percentile as fallback
+            posterior_edge = np.percentile(volume_points[:, 1], 25)  # Use 25th percentile as fallback
             self.logger.warning(f"Using default posterior edge at y={posterior_edge}")
         
         # Check if the anterior and posterior edges make sense
         if posterior_edge >= anterior_edge:
             self.logger.warning("Invalid pedicle edges detected, using statistical bounds")
-            posterior_edge = np.percentile(side_points[:, 1], 25)
-            anterior_edge = np.percentile(side_points[:, 1], 75)
+            posterior_edge = np.percentile(volume_points[:, 1], 25)
+            anterior_edge = np.percentile(volume_points[:, 1], 75)
             self.logger.info(f"Using statistical bounds: posterior={posterior_edge}, anterior={anterior_edge}")
         
-        # Now search for smallest cross-section within the range
+        # 7. NOW filter for side of interest
+        side_filter = volume_points[:, 0] < aligned_center[0] if is_left_side else volume_points[:, 0] > aligned_center[0]
+        side_points = volume_points[side_filter]
+        
+        if len(side_points) == 0:
+            self.logger.warning(f"No points found on the {side_text} side")
+            return 0, None, float('inf')
+        
+        # Build KD-tree for side-specific search
+        side_tree = cKDTree(side_points)
+        
+        # 8. Search for smallest cross-section within the range on the specific side
         min_area = float('inf')
         min_slice_idx = -1
         min_slice_points = None
@@ -2977,8 +2994,11 @@ class Vertebra:
         # Define slice thickness
         slice_thickness = 2.0  # mm
         
-        # Search for the smallest cross-section
+        # Search for the smallest cross-section (just in the side of interest)
         self.logger.info(f"Searching for smallest cross-section between y={posterior_edge} and y={anterior_edge}")
+        
+        # Create visualization for all slices (if in Slicer)
+        cross_section_nodes = []
         
         for y_idx in np.arange(posterior_edge, anterior_edge, slice_thickness):
             # Find points in this slice
@@ -2998,17 +3018,60 @@ class Vertebra:
                 min_slice_idx = y_idx
                 min_slice_points = slice_points
                 self.logger.debug(f"New minimum at y={y_idx}, area={slice_area}")
+                
+                # Visualize the current minimum slice if in Slicer
+                if hasattr(slicer, 'mrmlScene') and slice_area > 0:
+                    slice_cloud = self._numpy_to_vtk_polydata(slice_points)
+                    slice_model_name = f"CrossSection_y{y_idx:.1f}"
+                    
+                    # Clean up old nodes with similar names
+                    for node in slicer.mrmlScene.GetNodesByClass("vtkMRMLModelNode"):
+                        if node.GetName().startswith("CrossSection_") and node.GetName() not in cross_section_nodes:
+                            slicer.mrmlScene.RemoveNode(node)
+                    
+                    cross_section_model = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", slice_model_name)
+                    cross_section_model.SetAndObservePolyData(slice_cloud)
+                    cross_section_model.CreateDefaultDisplayNodes()
+                    if cross_section_model.GetDisplayNode():
+                        # Progression from red to blue
+                        progress = (y_idx - posterior_edge) / (anterior_edge - posterior_edge)
+                        r = max(0, min(1, 2 * (1 - progress)))
+                        b = max(0, min(1, 2 * progress - 1))
+                        cross_section_model.GetDisplayNode().SetColor(r, 0.0, b)
+                        cross_section_model.GetDisplayNode().SetOpacity(0.5)
+                    
+                    cross_section_nodes.append(slice_model_name)
         
         if min_slice_points is None or len(min_slice_points) == 0:
             self.logger.warning("No minimum slice found within pedicle boundaries")
             return 0, None, float('inf')
         
         self.logger.info(f"Found smallest cross-section at y={min_slice_idx} with area={min_area}")
+        self.logger.info(f"Smallest cross-section detection took {time.time() - start_time:.2f} seconds")
         
-        # Add marker for the smallest slice position
+        # Add marker for the smallest slice position (make it bigger and distinctive)
         if hasattr(slicer, 'mrmlScene') and 'debug_fiducials' in locals():
-            idx = debug_fiducials.AddFiducial(test_x, min_slice_idx, test_z)
+            idx = debug_fiducials.AddFiducial(
+                test_x - (15 if is_left_side else -15),  # Offset to side of interest
+                min_slice_idx, 
+                test_z
+            )
             debug_fiducials.SetNthFiducialLabel(idx, "Smallest Slice")
+            debug_fiducials.SetNthFiducialSelected(idx, True)
+            markup_display = debug_fiducials.GetDisplayNode()
+            if markup_display:
+                markup_display.SetGlyphScale(3.0)
+                markup_display.SetSelectedColor(1.0, 0.0, 1.0)  # Magenta for the smallest slice
+        
+        # Create a specific model for the minimum slice (with different color)
+        if hasattr(slicer, 'mrmlScene') and min_slice_points is not None and len(min_slice_points) > 0:
+            min_slice_cloud = self._numpy_to_vtk_polydata(min_slice_points)
+            min_slice_model = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "SmallestCrossSection")
+            min_slice_model.SetAndObservePolyData(min_slice_cloud)
+            min_slice_model.CreateDefaultDisplayNodes()
+            if min_slice_model.GetDisplayNode():
+                min_slice_model.GetDisplayNode().SetColor(1.0, 1.0, 0.0)  # Yellow
+                min_slice_model.GetDisplayNode().SetOpacity(1.0)
         
         return min_slice_idx, min_slice_points, min_area
     
@@ -3026,6 +3089,10 @@ class Vertebra:
             tuple: (pedicle_center, pedicle_border_points) - Center point and border points of pedicle
         """
         import numpy as np
+        import time
+        
+        start_time = time.time()
+        self.logger.info("Computing pedicle center and border...")
         
         # If we don't have any points, return default values
         if min_slice_points is None or len(min_slice_points) == 0:
@@ -3034,6 +3101,7 @@ class Vertebra:
         
         # Compute the center of the smallest cross-section
         pedicle_center = np.mean(min_slice_points, axis=0)
+        self.logger.info(f"Computed pedicle center at {pedicle_center}")
         
         # Extract the pedicle border from the surface cloud
         pedicle_border_points = None
@@ -3043,12 +3111,38 @@ class Vertebra:
             # Find surface points near the slice
             border_mask = np.abs(surface_points[:, 1] - min_slice_idx) < slice_thickness/2
             pedicle_border_points = surface_points[border_mask]
+            
+            self.logger.info(f"Found {len(pedicle_border_points) if pedicle_border_points is not None else 0} points on pedicle border")
+            
+            # Visualize the border points if in Slicer
+            if hasattr(slicer, 'mrmlScene') and pedicle_border_points is not None and len(pedicle_border_points) > 0:
+                # Remove existing border node if present
+                existing_node = slicer.mrmlScene.GetFirstNodeByName("PedicleBorderSlice")
+                if existing_node:
+                    slicer.mrmlScene.RemoveNode(existing_node)
+                    
+                border_cloud = self._numpy_to_vtk_polydata(pedicle_border_points)
+                border_model = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "PedicleBorderSlice")
+                border_model.SetAndObservePolyData(border_cloud)
+                border_model.CreateDefaultDisplayNodes()
+                if border_model.GetDisplayNode():
+                    border_model.GetDisplayNode().SetColor(0.0, 1.0, 1.0)  # Cyan
+                    border_model.GetDisplayNode().SetPointSize(4.0)
+        else:
+            self.logger.warning("No surface cloud available to extract border")
+        
+        self.logger.info(f"Pedicle center and border computation took {time.time() - start_time:.2f} seconds")
         
         return pedicle_center, pedicle_border_points
     
     def detect_pedicle_center_and_border(self, target_level=None):
         """
         Detect the pedicle center and border using the smallest cross-section approach.
+        This improved version:
+        1. Uses the full vertebra to detect spinal canal
+        2. Only filters by side after canal detection
+        3. Finds the smallest cross-section of the pedicle
+        4. Returns the pedicle center and border
         
         Parameters:
             target_level: Target vertebra level (e.g., 'L4', 'L5')
@@ -3057,62 +3151,105 @@ class Vertebra:
             tuple: (pedicle_center, pedicle_border, pca_vectors) in original space
         """
         import numpy as np
+        import time
         
-        # Step 1: Extract volume and surface point clouds
-        volume_cloud, surface_cloud, level_mask = self.extract_volume_and_surface_clouds(target_level)
+        start_time = time.time()
+        self.logger.info(f"Starting pedicle detection for level {target_level}")
         
-        # Step 2-3: Apply PCA and align point clouds
-        aligned_volume_cloud, aligned_surface_cloud, rotation_matrix, center_of_mass, aligned_center, pca_vectors = \
-            self.align_point_cloud_with_pca(volume_cloud, surface_cloud, level_mask)
+        try:
+            # Step 1: Extract volume and surface point clouds for the target level
+            self.logger.info("Extracting point clouds...")
+            volume_cloud, surface_cloud, level_mask = self.extract_volume_and_surface_clouds(target_level)
+            
+            if volume_cloud is None or volume_cloud.GetNumberOfPoints() == 0:
+                self.logger.error("Failed to extract volume point cloud")
+                return self.insertion_point, None, np.eye(3)
+            
+            # Step 2-3: Apply PCA and align point clouds
+            self.logger.info("Applying PCA and aligning point clouds...")
+            aligned_volume_cloud, aligned_surface_cloud, rotation_matrix, center_of_mass, aligned_center, pca_vectors = \
+                self.align_point_cloud_with_pca(volume_cloud, surface_cloud, level_mask)
+                
+            # Store for visualization
+            self.vertebra_center_ras = self._ijk_to_ras(center_of_mass) if hasattr(self, '_ijk_to_ras') else center_of_mass
+            
+            # Store best aligned PCA axis and score
+            best_idx, _, best_score = self.select_best_alignment_vector(pca_vectors, np.array([0, 1, 0]))
+            self.best_aligned_pca_idx = best_idx
+            self.pca_alignment_score = best_score
+            
+            # Step 4: Find smallest cross-section without pre-filtering by side
+            self.logger.info("Finding smallest cross-section...")
+            min_slice_idx, min_slice_points, min_area = self.find_smallest_pedicle_cross_section(
+                aligned_volume_cloud, aligned_surface_cloud, aligned_center, 
+                center_of_mass, rotation_matrix, self.insertion_point[0])
+            
+            # Log PCA and alignment details for debugging
+            self.logger.info(f"PCA vectors shape: {pca_vectors.shape}")
+            self.logger.info(f"Best aligned PCA axis: {best_idx} with score {best_score}")
+            self.logger.info(f"Center of mass: {center_of_mass}")
+            self.logger.info(f"Aligned center: {aligned_center}")
+            
+            # Step 5-6: Find pedicle center and border
+            self.logger.info("Computing pedicle center and border...")
+            aligned_pedicle_center, aligned_pedicle_border = self.compute_pedicle_center_and_border(
+                min_slice_points, aligned_surface_cloud, min_slice_idx)
+            
+            # Step 7: Transform back to original space
+            self.logger.info("Transforming back to original space...")
+            pedicle_center = self.transform_to_original_space(
+                aligned_pedicle_center, center_of_mass, rotation_matrix)
+            
+            # Create vtk polydata for pedicle border
+            pedicle_border_cloud = None
+            if aligned_pedicle_border is not None and len(aligned_pedicle_border) > 0:
+                # Transform border points back to original space
+                original_border_points = self.transform_to_original_space(
+                    aligned_pedicle_border, center_of_mass, rotation_matrix)
+                
+                # Create vtk polydata
+                pedicle_border_cloud = self._numpy_to_vtk_polydata(original_border_points)
+            
+            # Visualize the results if in Slicer environment
+            if hasattr(slicer, 'mrmlScene'):
+                # Clean up previous visualization nodes
+                for name in ["PedicleCenter", "PedicleBorder"]:
+                    existing_node = slicer.mrmlScene.GetFirstNodeByName(name)
+                    if existing_node:
+                        slicer.mrmlScene.RemoveNode(existing_node)
+                        
+                # Add fiducial for pedicle center
+                fiducial_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "PedicleCenter")
+                fiducial_node.AddFiducial(*pedicle_center)
+                fiducial_node.SetNthFiducialLabel(0, f"Pedicle Center {target_level}")
+                fiducial_node.CreateDefaultDisplayNodes()
+                if fiducial_node.GetDisplayNode():
+                    fiducial_node.GetDisplayNode().SetSelectedColor(1.0, 0.5, 0.0)  # Orange
+                    fiducial_node.GetDisplayNode().SetGlyphScale(3.0)
+                
+                # Visualize the pedicle border
+                if pedicle_border_cloud and pedicle_border_cloud.GetNumberOfPoints() > 0:
+                    border_model = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "PedicleBorder")
+                    border_model.SetAndObservePolyData(pedicle_border_cloud)
+                    border_model.CreateDefaultDisplayNodes()
+                    if border_model.GetDisplayNode():
+                        border_model.GetDisplayNode().SetColor(0.0, 1.0, 1.0)  # Cyan
+                        border_model.GetDisplayNode().SetPointSize(4.0)
+                
+                # Create 3D model showing PCA axes
+                self._visualize_pca_axes()
+            
+            self.logger.info(f"Pedicle detection completed in {time.time() - start_time:.2f} seconds")
+            
+            return pedicle_center, pedicle_border_cloud, pca_vectors
         
-        # Step 4: Find smallest cross-section
-        # Transform insertion point for side determination
-        min_slice_idx, min_slice_points, min_area = self.find_smallest_pedicle_cross_section(
-            aligned_volume_cloud, aligned_surface_cloud, aligned_center, 
-            center_of_mass, rotation_matrix, self.insertion_point[0])
-        
-        # Step 5-6: Find pedicle center and border
-        aligned_pedicle_center, aligned_pedicle_border = self.compute_pedicle_center_and_border(
-            min_slice_points, aligned_surface_cloud, min_slice_idx)
-        
-        # Step 7: Transform back to original space
-        pedicle_center = self.transform_to_original_space(
-            aligned_pedicle_center, center_of_mass, rotation_matrix)
-        
-        pedicle_border = self.transform_to_original_space(
-            aligned_pedicle_border, center_of_mass, rotation_matrix)
-        
-        # Create vtk polydata for pedicle border
-        pedicle_border_cloud = self._numpy_to_vtk_polydata(pedicle_border) if pedicle_border is not None else None
-        
-        # Visualize the results if in Slicer environment
-        if hasattr(slicer, 'mrmlScene'):
-            # Visualize the smallest cross-section
-            if min_slice_points is not None and len(min_slice_points) > 0:
-                cross_section_cloud = self._numpy_to_vtk_polydata(min_slice_points)
-                cross_section_model = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", f"SmallestCrossSection_{target_level}")
-                cross_section_model.SetAndObservePolyData(cross_section_cloud)
-                cross_section_model.CreateDefaultDisplayNodes()
-                if cross_section_model.GetDisplayNode():
-                    cross_section_model.GetDisplayNode().SetColor(1.0, 0.0, 1.0)  # Magenta
-                    
-            # Visualize the pedicle border
-            if pedicle_border_cloud and pedicle_border_cloud.GetNumberOfPoints() > 0:
-                border_model = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", f"PedicleBorder_{target_level}")
-                border_model.SetAndObservePolyData(pedicle_border_cloud)
-                border_model.CreateDefaultDisplayNodes()
-                if border_model.GetDisplayNode():
-                    border_model.GetDisplayNode().SetColor(0.0, 1.0, 1.0)  # Cyan
-                    
-            # Add fiducial for pedicle center
-            fiducial_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", f"PedicleCenter_{target_level}")
-            fiducial_node.AddFiducial(*pedicle_center)
-            fiducial_node.SetNthFiducialLabel(0, "Pedicle Center")
-            fiducial_node.CreateDefaultDisplayNodes()
-            if fiducial_node.GetDisplayNode():
-                fiducial_node.GetDisplayNode().SetSelectedColor(1.0, 0.5, 0.0)  # Orange
-        
-        return pedicle_center, pedicle_border_cloud, pca_vectors
+        except Exception as e:
+            self.logger.error(f"Error in detect_pedicle_center_and_border: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            
+            # Return defaults on error
+            return self.insertion_point, None, np.eye(3)
 
 def visualize_critical_points(vertebra):
     """
